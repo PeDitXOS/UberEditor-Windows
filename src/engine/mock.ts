@@ -329,6 +329,10 @@ export class MockEngine implements EngineClient {
     });
   }
 
+  async cutRanges(): Promise<StateSnapshot> {
+    throw new Error("La edición por texto requiere la app de escritorio (npx tauri dev)");
+  }
+
   async transcribeAsset(): Promise<void> {
     throw new Error("Transcribir requiere la app de escritorio (npx tauri dev)");
   }
@@ -524,6 +528,43 @@ export function demoProject(): Project {
     ],
   };
 
+  // transcripción demo de la voz en off (para el panel de Texto)
+  const frases = [
+    "hola a todos bienvenidos a un nuevo devlog",
+    "hoy vamos a construir un motor de físicas desde cero",
+    "eee bueno primero lo primero las colisiones",
+  ];
+  const words: Project["transcripts"][number]["words"] = [];
+  const segments: Project["transcripts"][number]["segments"] = [];
+  let t = 300_000;
+  for (const frase of frases) {
+    const from = words.length;
+    for (const palabra of frase.split(" ")) {
+      const dur = 180_000 + palabra.length * 30_000;
+      words.push({ text: palabra, start_us: t, end_us: t + dur, confidence: 0.95, rejected: false });
+      t += dur + 60_000;
+    }
+    segments.push({
+      text: frase,
+      start_us: words[from].start_us,
+      end_us: words[words.length - 1].end_us,
+      word_range: [from, words.length],
+      emotion: null,
+      volume_rms: 0,
+    });
+    t += 1_200_000; // pausa entre frases
+  }
+  const vozTranscript: Project["transcripts"][number] = {
+    id: newId("tr"),
+    asset_id: voz.id,
+    language: "es",
+    model: "base",
+    words,
+    segments,
+    global_avg_volume: 0,
+  };
+  voz.transcript = vozTranscript.id;
+
   return {
     schema_version: 1,
     id: newId("proj"),
@@ -531,7 +572,7 @@ export function demoProject(): Project {
     created_at: "",
     settings: { whisper_language: "auto", autosave_secs: 60 },
     assets: [cam, gameplay, screen, voz, musica, logo],
-    transcripts: [],
+    transcripts: [vozTranscript],
     sequences: [seq],
     active_sequence: seq.id,
   };

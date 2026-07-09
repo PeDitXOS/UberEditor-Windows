@@ -117,5 +117,14 @@ if (chromaVisible === 0) throw new Error("el efecto Chroma Key no apareció en e
 await effectSelect.selectOption("core.color_correct");
 await shot("07-panel-de-efectos");
 
+// 8. Panel de Texto: palabras de la transcripción, marcar dos para cortar
+await page.getByRole("button", { name: /Texto/ }).click();
+await page.waitForTimeout(250);
+await page.getByText("eee", { exact: false }).first().click();
+await page.getByText("bueno", { exact: false }).first().click();
+const cutBtn = await page.getByText(/Cortar 2 palabra/).count();
+if (cutBtn === 0) throw new Error("la selección de palabras no se refleja en el botón de corte");
+await shot("08-edicion-por-texto");
+
 await browser.close();
 console.log(`\nScreenshots en ${outDir}`);

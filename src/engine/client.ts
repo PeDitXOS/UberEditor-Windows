@@ -84,6 +84,13 @@ export interface EngineClient {
     value: boolean,
   ): Promise<StateSnapshot>;
 
+  /** Corta rangos del timeline en todas las pistas (ripple opcional). */
+  cutRanges(
+    sequenceId: Id,
+    ranges: [TimeUs, TimeUs][],
+    ripple: boolean,
+  ): Promise<StateSnapshot>;
+
   /** Lanza la transcripción Whisper de un asset (job en segundo plano). */
   transcribeAsset(assetId: Id, model?: string): Promise<void>;
 

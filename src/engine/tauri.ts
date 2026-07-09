@@ -170,6 +170,14 @@ export class TauriEngine implements EngineClient {
     return invoke("set_track_prop", { trackId, prop, value });
   }
 
+  cutRanges(
+    sequenceId: Id,
+    ranges: [TimeUs, TimeUs][],
+    ripple: boolean,
+  ): Promise<StateSnapshot> {
+    return invoke("cut_ranges", { sequenceId, ranges, ripple });
+  }
+
   transcribeAsset(assetId: Id, model?: string): Promise<void> {
     return invoke("transcribe_asset", { assetId, model: model ?? null });
   }

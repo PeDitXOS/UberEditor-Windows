@@ -63,6 +63,7 @@ export interface UiState {
   addTextClip: () => Promise<void>;
   removeSilences: (clipId: Id) => Promise<void>;
   transcribeAsset: (assetId: Id) => Promise<void>;
+  cutTimelineRanges: (ranges: [TimeUs, TimeUs][]) => Promise<void>;
   setClipText: (clipId: Id, content: string, style: TextStyle) => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
   undo: () => Promise<void>;
@@ -282,6 +283,14 @@ export const useStore = create<UiState>((set, get) => {
       run("Editar efectos", () => engine.setClipEffects(clipId, effects)),
     setClipTransition: (clipId, transition) =>
       run("Editar transición", () => engine.setClipTransition(clipId, transition)),
+
+    cutTimelineRanges: async (ranges) => {
+      if (!ranges.length) return;
+      const seqId = activeSequence(get().project).id;
+      await run(`Cortar ${ranges.length} rango(s) por texto`, () =>
+        engine.cutRanges(seqId, ranges, true),
+      );
+    },
 
     transcribeAsset: async (assetId) => {
       try {

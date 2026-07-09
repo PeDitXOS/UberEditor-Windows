@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { activeSequence } from "../engine/types";
 import { frameToUs } from "../lib/time";
@@ -9,6 +9,7 @@ import { Preview } from "./Preview";
 import { Inspector } from "./Inspector";
 import { Timeline } from "./Timeline";
 import { StatusBar } from "./StatusBar";
+import { TranscriptPanel } from "./TranscriptPanel";
 
 function useKeyboard() {
   useEffect(() => {
@@ -92,6 +93,8 @@ function usePlayback() {
 
 export function App() {
   const init = useStore((s) => s.init);
+  const [leftTab, setLeftTab] = useState<"media" | "texto">("media");
+  const transcriptCount = useStore((s) => s.project.transcripts.length);
   useEffect(() => {
     void init();
   }, [init]);
@@ -102,8 +105,28 @@ export function App() {
     <div className="flex h-full flex-col bg-bg0">
       <Header />
       <main className="flex min-h-0 flex-1">
-        <aside className="w-[264px] shrink-0 border-r border-line-soft bg-bg1">
-          <MediaPool />
+        <aside className="flex w-[264px] shrink-0 flex-col border-r border-line-soft bg-bg1">
+          <div className="flex gap-1 px-2 pt-2">
+            {(
+              [
+                ["media", "Medios"],
+                ["texto", `Texto${transcriptCount ? ` (${transcriptCount})` : ""}`],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                className={`focus-ring rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                  leftTab === key ? "bg-bg3 text-ink" : "text-ink-faint hover:text-ink"
+                }`}
+                onClick={() => setLeftTab(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1">
+            {leftTab === "media" ? <MediaPool /> : <TranscriptPanel />}
+          </div>
         </aside>
         <section className="flex min-w-0 flex-1 flex-col bg-bg0">
           <Preview />

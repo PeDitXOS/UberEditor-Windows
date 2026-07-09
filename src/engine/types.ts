@@ -214,6 +214,33 @@ export interface ProjectSettings {
   autosave_secs: number;
 }
 
+export interface TranscriptWord {
+  text: string;
+  start_us: TimeUs;
+  end_us: TimeUs;
+  confidence: number;
+  rejected: boolean;
+}
+
+export interface TranscriptSegment {
+  text: string;
+  start_us: TimeUs;
+  end_us: TimeUs;
+  word_range: [number, number];
+  emotion: string | null;
+  volume_rms: number;
+}
+
+export interface TranscriptDoc {
+  id: Id;
+  asset_id: Id;
+  language: string;
+  model: string;
+  words: TranscriptWord[];
+  segments: TranscriptSegment[];
+  global_avg_volume: number;
+}
+
 export interface Project {
   schema_version: number;
   id: Id;
@@ -221,9 +248,53 @@ export interface Project {
   created_at: string;
   settings: ProjectSettings;
   assets: MediaAsset[];
-  transcripts: unknown[];
+  transcripts: TranscriptDoc[];
   sequences: Sequence[];
   active_sequence: Id;
+}
+
+/** Posición de una palabra del asset en el timeline (vía el primer clip que la contiene). */
+export function wordTimelineRange(
+  project: Project,
+  assetId: Id,
+  word: TranscriptWord,
+): [TimeUs, TimeUs] | null {
+  const seq = activeSequence(project);
+  for (const track of seq.tracks) {
+    for (const clip of track.clips) {
+      if (clip.payload.type !== "media" || clip.payload.asset_id !== assetId) continue;
+      const { src_in, src_out } = clip.payload;
+      if (word.start_us >= src_in && word.start_us < src_out) {
+        const s = clip.start + Math.round((word.start_us - src_in) / clip.speed);
+        const e = clip.start + Math.round((Math.min(word.end_us, src_out) - src_in) / clip.speed);
+        return [s, Math.max(e, s + 1000)];
+      }
+    }
+  }
+  return null;
+}
+
+/** Rangos de timeline de un conjunto de palabras, con padding y fusión. */
+export function wordsToCutRanges(
+  project: Project,
+  assetId: Id,
+  words: TranscriptWord[],
+  padUs = 80_000,
+  mergeGapUs = 120_000,
+): [TimeUs, TimeUs][] {
+  const raw: [TimeUs, TimeUs][] = [];
+  for (const w of words) {
+    const r = wordTimelineRange(project, assetId, w);
+    if (r) raw.push([Math.max(0, r[0] - padUs), r[1] + padUs]);
+  }
+  raw.sort((a, b) => a[0] - b[0]);
+  const merged: [TimeUs, TimeUs][] = [];
+  for (const r of raw) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1] + mergeGapUs) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  return merged;
 }
 
 export function activeSequence(project: Project): Sequence {
