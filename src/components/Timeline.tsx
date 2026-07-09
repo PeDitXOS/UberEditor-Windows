@@ -1019,7 +1019,7 @@ export function Timeline() {
         <button
           className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
           onClick={zoomFit}
-          title="Ajustar todo (⇧Z)"
+          title="Ajustar todo el timeline a la vista"
         >
           Ajustar
         </button>
