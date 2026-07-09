@@ -541,6 +541,38 @@ fn set_clip_effects(
     Ok(snapshot(&store))
 }
 
+/// Elimina los silencios de un clip (corta y cierra huecos en TODAS las
+/// pistas: una sola entrada de undo). Requiere el audio conformado.
+#[tauri::command]
+fn remove_silences(state: State<AppState>, clip_id: String) -> Res<serde_json::Value> {
+    let id = parse_id(&clip_id)?;
+    let mut store = state.store.lock().unwrap();
+    let clip = store.project.clip(id).ok_or("clip no encontrado")?.clone();
+    let ue_core::model::ClipPayload::Media { asset_id, src_in, src_out } = clip.payload else {
+        return Err("el clip no es de media".into());
+    };
+    let asset = store.project.asset(asset_id).ok_or("asset no encontrado")?;
+    let conform = asset
+        .audio_conform
+        .clone()
+        .ok_or("el audio aún se está preparando (conformado); prueba en unos segundos")?;
+    let wav = ue_audio::wav::WavMap::open(Path::new(&conform)).map_err(|e| e.to_string())?;
+    let params = ue_ai::silence::SilenceParams::default();
+    let ranges =
+        ue_ai::silence::clip_silences_on_timeline(&wav, clip.start, src_in, src_out, &params);
+    if ranges.is_empty() {
+        return Ok(serde_json::json!({ "removed": 0, "removed_us": 0, "snapshot": snapshot(&store) }));
+    }
+    let removed_us: i64 = ranges.iter().map(|(s, e)| e - s).sum();
+    let seq_id = store.project.active_sequence;
+    store.cut_ranges(seq_id, &ranges, true).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "removed": ranges.len(),
+        "removed_us": removed_us,
+        "snapshot": snapshot(&store),
+    }))
+}
+
 /// Añade un clip de texto (título) en la pista de video superior.
 #[tauri::command]
 fn add_text_clip(state: State<AppState>, content: String, at_us: TimeUs) -> Res<StateSnapshot> {
@@ -770,6 +802,7 @@ pub fn run() {
             set_track_prop,
             add_text_clip,
             set_clip_text,
+            remove_silences,
             export_video,
             cancel_export,
             playback_play,

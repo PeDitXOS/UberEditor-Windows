@@ -170,6 +170,12 @@ export class TauriEngine implements EngineClient {
     return invoke("set_track_prop", { trackId, prop, value });
   }
 
+  removeSilences(
+    clipId: Id,
+  ): Promise<{ removed: number; removed_us: number; snapshot: StateSnapshot }> {
+    return invoke("remove_silences", { clipId });
+  }
+
   mcpStatus(): Promise<number | null> {
     return invoke("mcp_status");
   }

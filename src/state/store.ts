@@ -61,6 +61,7 @@ export interface UiState {
   setClipTransition: (clipId: Id, transition: TransitionRef | null) => Promise<void>;
   reloadEffectPacks: () => Promise<void>;
   addTextClip: () => Promise<void>;
+  removeSilences: (clipId: Id) => Promise<void>;
   setClipText: (clipId: Id, content: string, style: TextStyle) => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
   undo: () => Promise<void>;
@@ -280,6 +281,22 @@ export const useStore = create<UiState>((set, get) => {
       run("Editar efectos", () => engine.setClipEffects(clipId, effects)),
     setClipTransition: (clipId, transition) =>
       run("Editar transición", () => engine.setClipTransition(clipId, transition)),
+
+    removeSilences: async (clipId) => {
+      try {
+        set({ lastActionLabel: "Analizando silencios…" });
+        const r = await engine.removeSilences(clipId);
+        const secs = (r.removed_us / 1e6).toFixed(1);
+        applySnapshot(
+          r.snapshot,
+          r.removed > 0
+            ? `Eliminados ${r.removed} silencios (${secs} s)`
+            : "No se encontraron silencios",
+        );
+      } catch (e) {
+        set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
+      }
+    },
 
     addTextClip: async () => {
       await run("Añadir título", () => engine.addTextClip("Título", get().playheadUs));

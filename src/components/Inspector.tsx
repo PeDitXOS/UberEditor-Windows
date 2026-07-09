@@ -68,6 +68,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
   const project = useStore((s) => s.project);
   const setClipAudio = useStore((s) => s.setClipAudio);
   const setClipTransform = useStore((s) => s.setClipTransform);
+  const removeSilences = useStore((s) => s.removeSilences);
   const fps = activeSequence(project).fps;
 
   const asset =
@@ -179,6 +180,18 @@ function ClipInspector({ clip }: { clip: Clip }) {
       )}
 
       {clip.payload.type === "text" && <TextPanel clip={clip} />}
+
+      {clip.payload.type === "media" && asset && asset.probe.audio_channels > 0 && (
+        <Section title="Silencios">
+          <button
+            className="focus-ring w-full rounded-md border border-line bg-bg2 px-2.5 py-2 text-[12px] text-ink hover:bg-bg3"
+            onClick={() => void removeSilences(clip.id)}
+            title="Detecta silencios en este clip y los corta cerrando los huecos (una sola acción de deshacer)"
+          >
+            🔇 Eliminar silencios del clip
+          </button>
+        </Section>
+      )}
 
       {clip.payload.type === "media" && <TransitionPanel clip={clip} />}
       <EffectsPanel clip={clip} />

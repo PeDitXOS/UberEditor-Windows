@@ -84,6 +84,9 @@ export interface EngineClient {
     value: boolean,
   ): Promise<StateSnapshot>;
 
+  /** Elimina silencios de un clip; devuelve nº de cortes y µs eliminados. */
+  removeSilences(clipId: Id): Promise<{ removed: number; removed_us: number; snapshot: StateSnapshot }>;
+
   /** Puerto del servidor MCP embebido (null si no está activo). */
   mcpStatus(): Promise<number | null>;
 

@@ -93,6 +93,15 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "remove_silences",
+            "description": "Detecta y elimina los silencios de un clip (corta y cierra huecos en todas las pistas; una sola entrada de undo). El clip debe tener audio conformado.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" } },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "undo",
             "description": "Deshace la última edición.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -224,6 +233,16 @@ fn call_tool(state: &AppState, name: &str, args: &Value) -> Value {
                 Err(e) => tool_error(&e.to_string()),
             }
         }
+        "remove_silences" => {
+            let clip_id = match parse_id("clip_id") {
+                Ok(v) => v,
+                Err(e) => return tool_error(&e),
+            };
+            match remove_silences_inner(state, clip_id) {
+                Ok((n, us)) => text_result(json!({ "removed": n, "removed_us": us })),
+                Err(e) => tool_error(&e),
+            }
+        }
         "undo" => {
             let mut store = state.store.lock().unwrap();
             match store.undo() {
@@ -240,6 +259,28 @@ fn call_tool(state: &AppState, name: &str, args: &Value) -> Value {
         }
         _ => tool_error(&format!("herramienta desconocida: {name}")),
     }
+}
+
+fn remove_silences_inner(state: &AppState, clip_id: ue_core::model::Id) -> Result<(usize, i64), String> {
+    let mut store = state.store.lock().unwrap();
+    let clip = store.project.clip(clip_id).ok_or("clip no encontrado")?.clone();
+    let ue_core::model::ClipPayload::Media { asset_id, src_in, src_out } = clip.payload else {
+        return Err("el clip no es de media".into());
+    };
+    let asset = store.project.asset(asset_id).ok_or("asset no encontrado")?;
+    let conform = asset.audio_conform.clone().ok_or("audio sin conformar todavía")?;
+    let wav = ue_audio::wav::WavMap::open(std::path::Path::new(&conform))
+        .map_err(|e| e.to_string())?;
+    let params = ue_ai::silence::SilenceParams::default();
+    let ranges =
+        ue_ai::silence::clip_silences_on_timeline(&wav, clip.start, src_in, src_out, &params);
+    if ranges.is_empty() {
+        return Ok((0, 0));
+    }
+    let removed_us: i64 = ranges.iter().map(|(s, e)| e - s).sum();
+    let seq_id = store.project.active_sequence;
+    store.cut_ranges(seq_id, &ranges, true).map_err(|e| e.to_string())?;
+    Ok((ranges.len(), removed_us))
 }
 
 /// Igual que el comando add_clip de la UI (duplicado consciente y pequeño).

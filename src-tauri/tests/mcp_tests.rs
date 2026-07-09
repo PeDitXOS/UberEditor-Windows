@@ -142,3 +142,77 @@ fn split_edit_and_undo_via_mcp() {
     );
     assert_eq!(resp.pointer("/result/isError").unwrap(), true);
 }
+
+/// remove_silences de punta a punta: video con tono-silencio-tono real,
+/// conformado incluido. Verifica cortes y duración final.
+#[test]
+fn remove_silences_via_mcp_cuts_the_gap() {
+    let ff_ok = std::process::Command::new(ue_media::ffmpeg_bin())
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ff_ok {
+        eprintln!("AVISO: sin ffmpeg; test saltado");
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-mcp-media");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("tono_silencio_tono.mp4");
+    // 2s tono + 2s silencio + 2s tono, con video de color
+    let st = std::process::Command::new(ue_media::ffmpeg_bin())
+        .args([
+            "-y", "-v", "error",
+            "-f", "lavfi", "-i", "color=c=gray:s=320x180:d=6:r=30",
+            "-f", "lavfi", "-i",
+            "aevalsrc='if(lt(mod(t,6),2)*0.4+gte(mod(t,6),4)*0.4, 0.4*sin(880*2*PI*t), 0)':d=6",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest",
+        ])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(st.success());
+
+    let state = AppState::new_default();
+    let clip_id;
+    {
+        let mut store = state.store.lock().unwrap();
+        let mut asset = ue_media::import_file(&src).unwrap();
+        // conformar el audio a mano (en la app lo hace el job de import)
+        let conform = dir.join("conform.wav");
+        ue_media::conform_audio(&src, &conform).unwrap();
+        asset.audio_conform = Some(conform.to_string_lossy().into_owned());
+        let aid = asset.id;
+        store.project.assets.push(asset);
+        let vtrack = store
+            .project
+            .sequence(store.project.active_sequence)
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        let clip = Clip::new_media(aid, 0, 6 * SEC, 0);
+        clip_id = clip.id;
+        store.insert_clip(vtrack, clip, InsertMode::Strict).unwrap();
+    }
+
+    let resp = rpc(
+        &state,
+        "tools/call",
+        json!({ "name": "remove_silences", "arguments": { "clip_id": clip_id.to_string() } }),
+    );
+    let result = tool_json(&resp);
+    assert_eq!(result["removed"], 1, "un silencio central: {result}");
+    let removed_us = result["removed_us"].as_i64().unwrap();
+    assert!((1_200_000..=2_200_000).contains(&removed_us), "≈2 s menos padding: {removed_us}");
+
+    let store = state.store.lock().unwrap();
+    let seq = store.project.sequence(store.project.active_sequence).unwrap();
+    let dur = seq.duration_us();
+    assert!((3_800_000..=4_900_000).contains(&dur), "duración final ≈ 6s - silencio: {dur}");
+    let clips: usize = seq.tracks.iter().map(|t| t.clips.len()).sum();
+    assert_eq!(clips, 2, "el clip quedó partido en dos alrededor del silencio");
+}
