@@ -105,4 +105,32 @@ export class TauriEngine implements EngineClient {
   async onStateChanged(cb: () => void): Promise<() => void> {
     return listen("state-changed", cb);
   }
+
+  saveProject(path: string | null): Promise<string> {
+    return invoke("save_project", { path });
+  }
+  openProject(path: string): Promise<StateSnapshot> {
+    return invoke("open_project", { path });
+  }
+  async pickProjectSavePath(defaultName: string): Promise<string | null> {
+    return save({
+      title: "Guardar proyecto",
+      defaultPath: defaultName,
+      filters: [{ name: "Proyecto UberEditor", extensions: ["uep"] }],
+    });
+  }
+  async pickProjectOpenPath(): Promise<string | null> {
+    const picked = await open({
+      title: "Abrir proyecto",
+      multiple: false,
+      filters: [{ name: "Proyecto UberEditor", extensions: ["uep"] }],
+    });
+    return typeof picked === "string" ? picked : null;
+  }
+
+  async playbackFrame(): Promise<Uint8Array | null> {
+    const buf = await invoke<ArrayBuffer>("playback_frame");
+    const bytes = new Uint8Array(buf);
+    return bytes.length > 0 ? bytes : null;
+  }
 }

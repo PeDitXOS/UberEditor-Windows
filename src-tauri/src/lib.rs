@@ -3,7 +3,9 @@
 //! `state.patch` llegarán cuando el volumen de datos lo justifique.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -12,12 +14,109 @@ use ue_audio::player::Player;
 use ue_core::model::{AudioProps, Clip, Id, MediaKind, Project, TrackKind, Transform2D};
 use ue_core::ops::InsertMode;
 use ue_core::{ProjectStore, TimeUs};
+use ue_media::stream::MjpegSession;
 
 pub struct AppState {
     pub store: Mutex<ProjectStore>,
     pub path: Mutex<Option<PathBuf>>,
     pub cache_dir: Mutex<Option<PathBuf>>,
     pub player: Mutex<Option<Player>>,
+    pub frames: Mutex<Option<FrameService>>,
+}
+
+/// Servicio de frames de reproducción: un hilo sigue al reloj de audio con una
+/// sesión MJPEG persistente y publica el último frame decodificado.
+pub struct FrameService {
+    pub latest: Arc<Mutex<Vec<u8>>>,
+    pub running: Arc<AtomicBool>,
+}
+
+const PLAYBACK_FPS: u32 = 24;
+const PLAYBACK_MAX_W: u32 = 960;
+
+fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, running: Arc<AtomicBool>) {
+    let mut session: Option<MjpegSession> = None;
+    while running.load(Ordering::SeqCst) {
+        let state = app.state::<AppState>();
+        let (t, playing) = {
+            let guard = state.player.lock().unwrap();
+            match guard.as_ref() {
+                Some(p) => (p.position_us(), p.is_playing()),
+                None => (0, false),
+            }
+        };
+        if !playing {
+            break;
+        }
+        let resolved = {
+            let store = state.store.lock().unwrap();
+            ue_media::frame::resolve_top_video(
+                &store.project,
+                store.project.active_sequence,
+                t,
+            )
+        };
+        let Some(r) = resolved else {
+            latest.lock().unwrap().clear();
+            session = None;
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        };
+        let path = PathBuf::from(&r.asset_path);
+        let src_t = r.src_t_us;
+
+        // ¿sirve la sesión actual? (mismo archivo, posición alcanzable hacia delante)
+        let reusable = session.as_ref().is_some_and(|s| {
+            s.asset_path == path
+                && src_t >= s.next_src_us() - 1_000_000 / PLAYBACK_FPS as i64
+                && src_t <= s.next_src_us() + 1_500_000
+        });
+        if !reusable {
+            session = MjpegSession::open(&path, src_t, PLAYBACK_MAX_W, PLAYBACK_FPS).ok();
+        }
+        if let Some(s) = session.as_mut() {
+            let mut newest: Option<Vec<u8>> = None;
+            let mut dead = false;
+            while s.next_src_us() <= src_t {
+                match s.next_frame() {
+                    Ok(Some(f)) => newest = Some(f),
+                    _ => {
+                        dead = true;
+                        break;
+                    }
+                }
+            }
+            if dead {
+                session = None;
+            }
+            if let Some(f) = newest {
+                *latest.lock().unwrap() = f;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1000 / PLAYBACK_FPS as u64 / 2));
+    }
+    running.store(false, Ordering::SeqCst);
+}
+
+fn start_frame_service(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let mut guard = state.frames.lock().unwrap();
+    if let Some(fs) = guard.as_ref() {
+        if fs.running.load(Ordering::SeqCst) {
+            return; // ya corre
+        }
+    }
+    let latest = Arc::new(Mutex::new(Vec::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    *guard = Some(FrameService { latest: latest.clone(), running: running.clone() });
+    let app2 = app.clone();
+    std::thread::spawn(move || frame_service_loop(app2, latest, running));
+}
+
+fn stop_frame_service(state: &AppState) {
+    if let Some(fs) = state.frames.lock().unwrap().as_ref() {
+        fs.running.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Ruta del WAV conformado de un asset en la caché de la app.
@@ -243,20 +342,34 @@ fn spawn_conform_job(app: &tauri::AppHandle, asset: &ue_core::model::MediaAsset,
 // ---- transporte (el audio es el reloj maestro) ----
 
 #[tauri::command]
-fn playback_play(state: State<AppState>, from_us: TimeUs) -> Res<()> {
+fn playback_play(app: tauri::AppHandle, state: State<AppState>, from_us: TimeUs) -> Res<()> {
     sync_player(&state)?;
-    let guard = state.player.lock().unwrap();
-    guard.as_ref().unwrap().play(from_us);
+    {
+        let guard = state.player.lock().unwrap();
+        guard.as_ref().unwrap().play(from_us);
+    }
+    start_frame_service(&app);
     Ok(())
 }
 
 #[tauri::command]
 fn playback_pause(state: State<AppState>) -> Res<TimeUs> {
+    stop_frame_service(&state);
     let guard = state.player.lock().unwrap();
     match guard.as_ref() {
         Some(p) => Ok(p.pause()),
         None => Err("sin reproductor".into()),
     }
+}
+
+/// Último frame del stream de reproducción (vacío = sin señal todavía).
+#[tauri::command]
+fn playback_frame(state: State<AppState>) -> Res<tauri::ipc::Response> {
+    let bytes = match state.frames.lock().unwrap().as_ref() {
+        Some(fs) => fs.latest.lock().unwrap().clone(),
+        None => vec![],
+    };
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -416,6 +529,7 @@ pub fn run() {
         path: Mutex::new(None),
         cache_dir: Mutex::new(None),
         player: Mutex::new(None),
+        frames: Mutex::new(None),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -447,6 +561,7 @@ pub fn run() {
             playback_pause,
             playback_seek,
             playback_position,
+            playback_frame,
             save_project,
             open_project,
             new_project,

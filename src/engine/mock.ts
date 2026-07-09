@@ -279,6 +279,22 @@ export class MockEngine implements EngineClient {
     return () => {};
   }
 
+  async saveProject(): Promise<string> {
+    throw new Error("Guardar requiere la app de escritorio (npx tauri dev)");
+  }
+  async openProject(): Promise<StateSnapshot> {
+    throw new Error("Abrir requiere la app de escritorio (npx tauri dev)");
+  }
+  async pickProjectSavePath(): Promise<string | null> {
+    return null;
+  }
+  async pickProjectOpenPath(): Promise<string | null> {
+    return null;
+  }
+  async playbackFrame(): Promise<Uint8Array | null> {
+    return null;
+  }
+
   /** Ayuda para tests/pruebas: alterna props de pista. */
   async toggleTrack(trackId: Id, prop: "muted" | "solo" | "locked"): Promise<StateSnapshot> {
     return this.transaction("Pista", () => {

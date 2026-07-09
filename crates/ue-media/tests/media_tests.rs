@@ -151,6 +151,32 @@ fn resolve_maps_timeline_to_source_time() {
 }
 
 #[test]
+fn mjpeg_session_reads_sequential_frames() {
+    let dir = require_media!();
+    let mut session =
+        ue_media::stream::MjpegSession::open(&dir.join("video_a.mp4"), 2_000_000, 480, 24)
+            .unwrap();
+    assert_eq!(session.next_src_us(), 2_000_000);
+    let mut frames = 0;
+    for _ in 0..12 {
+        let frame = session.next_frame().unwrap().expect("frame disponible");
+        assert_eq!(&frame[0..2], &[0xFF, 0xD8]);
+        assert_eq!(&frame[frame.len() - 2..], &[0xFF, 0xD9]);
+        frames += 1;
+    }
+    assert_eq!(frames, 12);
+    // 12 frames a 24 fps = 0.5 s avanzados desde el inicio de la sesión
+    assert_eq!(session.next_src_us(), 2_500_000);
+    // el video dura 6 s: desde 2 s quedan ~4 s * 24 fps ≈ 96 frames; agotarlo
+    let mut rest = 0;
+    while session.next_frame().unwrap().is_some() {
+        rest += 1;
+        assert!(rest < 200, "no debe ser infinito");
+    }
+    assert!((80..=110).contains(&rest), "quedaban ≈96 frames, fueron {rest}");
+}
+
+#[test]
 fn render_frame_produces_jpegs_for_visual_check() {
     let dir = require_media!();
     let mut project = Project::new("t");

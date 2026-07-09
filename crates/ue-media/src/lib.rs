@@ -6,6 +6,7 @@
 pub mod frame;
 pub mod hashing;
 pub mod probe;
+pub mod stream;
 
 use std::path::Path;
 

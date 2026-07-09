@@ -9,6 +9,8 @@ export function Header() {
   const redo = useStore((s) => s.redo);
   const exportVideo = useStore((s) => s.exportVideo);
   const exporting = useStore((s) => s.exporting);
+  const saveProject = useStore((s) => s.saveProject);
+  const openProject = useStore((s) => s.openProject);
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-bg1 px-3">
@@ -29,6 +31,23 @@ export function Header() {
       </div>
 
       <div className="flex-1" />
+
+      <button
+        className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim hover:bg-bg3 hover:text-ink"
+        onClick={() => void openProject()}
+        title="Abrir proyecto (⌘O)"
+      >
+        Abrir…
+      </button>
+      <button
+        className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim hover:bg-bg3 hover:text-ink"
+        onClick={() => void saveProject()}
+        title="Guardar proyecto (⌘S)"
+      >
+        Guardar
+      </button>
+
+      <div className="mx-1 h-5 w-px bg-line" />
 
       <button
         className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim enabled:hover:bg-bg3 enabled:hover:text-ink disabled:opacity-40"

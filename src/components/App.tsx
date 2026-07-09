@@ -21,6 +21,12 @@ function useKeyboard() {
       if (e.code === "Space") {
         e.preventDefault();
         s.togglePlay();
+      } else if (mod && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void s.saveProject();
+      } else if (mod && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        void s.openProject();
       } else if (mod && e.key.toLowerCase() === "z" && e.shiftKey) {
         e.preventDefault();
         void s.redo();

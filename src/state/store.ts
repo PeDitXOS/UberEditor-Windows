@@ -47,6 +47,8 @@ export interface UiState {
   addClipFromAsset: (assetId: Id) => Promise<void>;
   exporting: boolean;
   exportVideo: () => Promise<void>;
+  saveProject: () => Promise<void>;
+  openProject: () => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
@@ -243,6 +245,41 @@ export const useStore = create<UiState>((set, get) => {
       if (engine.kind === "mock") {
         const snap = await (engine as MockEngine).toggleTrack(trackId, prop);
         applySnapshot(snap, "Pista");
+      }
+    },
+
+    saveProject: async () => {
+      try {
+        let written: string;
+        try {
+          written = await engine.saveProject(null);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!msg.includes("no hay ruta")) throw e;
+          const name = `${get().project.name.replace(/[^\p{L}\p{N} _-]/gu, "").trim() || "proyecto"}.uep`;
+          const path = await engine.pickProjectSavePath(name);
+          if (!path) return;
+          written = await engine.saveProject(path);
+        }
+        applySnapshot(await engine.getState(), `Guardado en ${written}`);
+      } catch (e) {
+        set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
+      }
+    },
+
+    openProject: async () => {
+      try {
+        const path = await engine.pickProjectOpenPath();
+        if (!path) {
+          if (engine.kind === "mock")
+            set({ lastActionLabel: "⚠ Abrir requiere la app de escritorio (npx tauri dev)" });
+          return;
+        }
+        const snap = await engine.openProject(path);
+        set({ selection: [], playheadUs: 0, playing: false });
+        applySnapshot(snap, `Abierto ${path}`);
+      } catch (e) {
+        set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
       }
     },
 

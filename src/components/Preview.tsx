@@ -113,6 +113,12 @@ function badge(ctx: CanvasRenderingContext2D, w: number, h: number, text: string
   ctx.fillText(text, w - bw - h * 0.04 + h * 0.015, h * 0.09);
 }
 
+async function toBitmap(bytes: Uint8Array): Promise<ImageBitmap> {
+  return createImageBitmap(
+    new Blob([bytes.slice().buffer as ArrayBuffer], { type: "image/jpeg" }),
+  );
+}
+
 function TransportButton({
   label,
   title,
@@ -165,12 +171,30 @@ export function Preview() {
     return () => obs.disconnect();
   }, []);
 
-  // Frame real (solo escritorio): debounce corto al hacer seek; durante la
-  // reproducción, frames a baja cadencia (~2/s) hasta que exista el DecodePool.
+  // Frame real (solo escritorio).
+  // Reproduciendo: stream continuo del FrameService a ~24 fps (playback_frame).
   useEffect(() => {
-    if (engine.kind !== "tauri") return;
+    if (engine.kind !== "tauri" || !playing) return;
+    let alive = true;
+    const id = window.setInterval(async () => {
+      try {
+        const bytes = await engine.playbackFrame();
+        if (!alive) return;
+        if (bytes) setRealFrame(await toBitmap(bytes));
+      } catch {
+        /* mantener el último frame */
+      }
+    }, 1000 / 24);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [playing]);
+
+  // En pausa/seek: un frame de alta calidad con debounce corto (render_frame).
+  useEffect(() => {
+    if (engine.kind !== "tauri" || playing) return;
     const req = ++frameReqRef.current;
-    const delay = playing ? 450 : 90;
     const handle = window.setTimeout(async () => {
       try {
         const bytes = await engine.renderFrame(playheadUs, 1280);
@@ -179,14 +203,12 @@ export function Preview() {
           setRealFrame(null);
           return;
         }
-        const bmp = await createImageBitmap(
-          new Blob([bytes.slice().buffer as ArrayBuffer], { type: "image/jpeg" }),
-        );
+        const bmp = await toBitmap(bytes);
         if (frameReqRef.current === req) setRealFrame(bmp);
       } catch {
         if (frameReqRef.current === req) setRealFrame(null);
       }
-    }, delay);
+    }, 90);
     return () => window.clearTimeout(handle);
   }, [playheadUs, version, playing]);
 

@@ -48,4 +48,14 @@ export interface EngineClient {
 
   /** Suscripción a cambios de estado originados en el backend (jobs). */
   onStateChanged(cb: () => void): Promise<() => void>;
+
+  // -- proyecto en disco (solo escritorio) --
+  /** Guarda a la ruta dada (o a la última usada si es null). Devuelve la ruta. */
+  saveProject(path: string | null): Promise<string>;
+  openProject(path: string): Promise<StateSnapshot>;
+  pickProjectSavePath(defaultName: string): Promise<string | null>;
+  pickProjectOpenPath(): Promise<string | null>;
+
+  /** Último frame JPEG del stream de reproducción (vacío = sin señal). */
+  playbackFrame(): Promise<Uint8Array | null>;
 }
