@@ -11,6 +11,7 @@ import type {
   StateSnapshot,
   TimeUs,
   Transform2D,
+  TransitionRef,
 } from "./types";
 
 export function isTauri(): boolean {
@@ -147,6 +148,9 @@ export class TauriEngine implements EngineClient {
   }
   setClipEffects(clipId: Id, effects: EffectInstance[]): Promise<StateSnapshot> {
     return invoke("set_clip_effects", { clipId, effects });
+  }
+  setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot> {
+    return invoke("set_clip_transition", { clipId, transition });
   }
 
   cancelExport(): Promise<void> {

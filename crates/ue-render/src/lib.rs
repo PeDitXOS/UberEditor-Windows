@@ -138,6 +138,76 @@ pub fn catalog_json(registry: &[EffectDef]) -> serde_json::Value {
     serde_json::to_value(registry).expect("registry serializable")
 }
 
+// ---------------------------------------------------------------------------
+// Transform2D → cadena ffmpeg (backend v0)
+// ---------------------------------------------------------------------------
+
+/// Cadena -vf del transform de un clip: crop → escala → rotación → flips
+/// (orden del PLAN §6.8). Posición y opacidad requieren composición real
+/// (motor wgpu); v0 las omite. Curvas: se evalúan en t=0 (keyframes de
+/// transform en render llegan con el motor wgpu).
+pub fn transform_vf(t: &ue_core::model::Transform2D) -> Option<String> {
+    let mut parts: Vec<String> = vec![];
+
+    let (l, top, r, b) = (
+        t.crop.0.eval(0).clamp(0.0, 0.49),
+        t.crop.1.eval(0).clamp(0.0, 0.49),
+        t.crop.2.eval(0).clamp(0.0, 0.49),
+        t.crop.3.eval(0).clamp(0.0, 0.49),
+    );
+    if l + top + r + b > 1e-4 {
+        parts.push(format!(
+            "crop=w=trunc(iw*{}/2)*2:h=trunc(ih*{}/2)*2:x=iw*{}:y=ih*{}",
+            format_float(1.0 - l - r),
+            format_float(1.0 - top - b),
+            format_float(l),
+            format_float(top),
+        ));
+    }
+
+    let (sx, sy) = (t.scale.0.eval(0).clamp(0.01, 10.0), t.scale.1.eval(0).clamp(0.01, 10.0));
+    if (sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4 {
+        parts.push(format!(
+            "scale=trunc(iw*{}/2)*2:trunc(ih*{}/2)*2",
+            format_float(sx),
+            format_float(sy),
+        ));
+    }
+
+    let deg = t.rotation.eval(0);
+    if deg.abs() > 1e-4 {
+        let rad = format_float(deg.to_radians());
+        parts.push(format!("rotate={rad}:ow=rotw({rad}):oh=roth({rad}):c=black"));
+    }
+
+    if t.flip_h {
+        parts.push("hflip".into());
+    }
+    if t.flip_v {
+        parts.push("vflip".into());
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
+/// Cadena completa de un clip: efectos + transform (en ese orden).
+pub fn clip_vf(
+    registry: &[EffectDef],
+    effects: &[EffectInstance],
+    transform: &ue_core::model::Transform2D,
+) -> Option<String> {
+    match (render_chain(registry, effects), transform_vf(transform)) {
+        (Some(e), Some(t)) => Some(format!("{e},{t}")),
+        (Some(e), None) => Some(e),
+        (None, Some(t)) => Some(t),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +260,38 @@ mod tests {
         // color corrupto → default del manifest
         let bad = inst("core.chroma_key", &[], &[("key_color", "verde;rm -rf")]);
         assert!(render_effect(def, &bad).contains("color=0x00FF00"));
+    }
+
+    #[test]
+    fn transform_noop_is_none_and_order_is_crop_scale_rotate_flip() {
+        use ue_core::model::Transform2D;
+        assert_eq!(transform_vf(&Transform2D::default()), None);
+
+        let mut t = Transform2D::default();
+        t.crop.0 = 0.25.into(); // 25% por la izquierda
+        t.scale = (0.5.into(), 0.5.into());
+        t.rotation = 180.0.into();
+        t.flip_h = true;
+        let vf = transform_vf(&t).unwrap();
+        let crop_pos = vf.find("crop=").unwrap();
+        let scale_pos = vf.find("scale=").unwrap();
+        let rot_pos = vf.find("rotate=").unwrap();
+        let flip_pos = vf.find("hflip").unwrap();
+        assert!(crop_pos < scale_pos && scale_pos < rot_pos && rot_pos < flip_pos, "{vf}");
+        assert!(vf.contains("rotate=3.1416"), "180° en radianes: {vf}");
+        assert!(vf.contains("x=iw*0.25"), "{vf}");
+    }
+
+    #[test]
+    fn clip_vf_combines_effects_then_transform() {
+        use ue_core::model::Transform2D;
+        let reg = core_registry();
+        let fx = [inst("core.gaussian_blur", &[("sigma", 3.0)], &[])];
+        let mut t = Transform2D::default();
+        t.flip_v = true;
+        let vf = clip_vf(&reg, &fx, &t).unwrap();
+        assert!(vf.starts_with("gblur"), "{vf}");
+        assert!(vf.ends_with("vflip"), "{vf}");
     }
 
     #[test]

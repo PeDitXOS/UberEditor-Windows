@@ -12,6 +12,7 @@ import type {
   StateSnapshot,
   TimeUs,
   Transform2D,
+  TransitionRef,
 } from "../engine/types";
 import { activeSequence } from "../engine/types";
 
@@ -55,6 +56,7 @@ export interface UiState {
   openProject: () => Promise<void>;
   effectsCatalog: EffectDef[];
   setClipEffects: (clipId: Id, effects: EffectInstance[]) => Promise<void>;
+  setClipTransition: (clipId: Id, transition: TransitionRef | null) => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
@@ -265,6 +267,8 @@ export const useStore = create<UiState>((set, get) => {
     effectsCatalog: [],
     setClipEffects: (clipId, effects) =>
       run("Editar efectos", () => engine.setClipEffects(clipId, effects)),
+    setClipTransition: (clipId, transition) =>
+      run("Editar transición", () => engine.setClipTransition(clipId, transition)),
 
     toggleTrack: async (trackId, prop) => {
       // v0: solo el mock lo implementa; el backend real llegará con SetTrackProp

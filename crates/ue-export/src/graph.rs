@@ -107,11 +107,10 @@ pub fn build_ffmpeg_args(
         "fps={fps},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,\
          pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
     );
-    let mut vlabels: Vec<String> = vec![];
     for (k, seg) in edl.iter().enumerate() {
         let label = format!("v{k}");
         match seg {
-            Segment::Source { asset_id, src_in, src_out, vf } => {
+            Segment::Source { asset_id, src_in, src_out, vf, .. } => {
                 let idx = input_of(*asset_id, project);
                 let effects = match vf {
                     Some(chain) => format!("{chain},"),
@@ -130,13 +129,38 @@ pub fn build_ffmpeg_args(
                 ));
             }
         }
-        vlabels.push(format!("[{label}]"));
     }
-    fc.push(format!(
-        "{}concat=n={}:v=1:a=0[vout]",
-        vlabels.join(""),
-        vlabels.len()
-    ));
+
+    // Combinación secuencial: concat en cortes duros, xfade en transiciones.
+    let mut current = "v0".to_string();
+    let mut acc_dur = edl[0].duration();
+    for (k, seg) in edl.iter().enumerate().skip(1) {
+        let out_label = format!("m{k}");
+        let transition = match seg {
+            Segment::Source { transition_in, .. } => *transition_in,
+            _ => None,
+        };
+        match transition {
+            Some(d) => {
+                let offset = acc_dur - d;
+                fc.push(format!(
+                    "[{current}][v{k}]xfade=transition=fade:duration={}:offset={}[{out_label}]",
+                    secs(d),
+                    secs(offset),
+                ));
+                acc_dur += seg.duration() - d;
+            }
+            None => {
+                fc.push(format!(
+                    "[{current}][v{k}]concat=n=2:v=1:a=0[{out_label}]"
+                ));
+                acc_dur += seg.duration();
+            }
+        }
+        current = out_label;
+    }
+    // renombrar la última etiqueta a [vout] con un passthrough barato
+    fc.push(format!("[{current}]null[vout]"));
 
     // ---- cadenas de audio ----
     let mut alabels: Vec<String> = vec![];

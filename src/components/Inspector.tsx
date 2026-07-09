@@ -172,8 +172,56 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </Section>
       )}
 
+      {clip.payload.type === "media" && <TransitionPanel clip={clip} />}
       <EffectsPanel clip={clip} />
     </>
+  );
+}
+
+function TransitionPanel({ clip }: { clip: Clip }) {
+  const setClipTransition = useStore((s) => s.setClipTransition);
+  const durS = (clip.transition_in?.duration ?? 500_000) / 1e6;
+
+  return (
+    <Section title="Transición de entrada">
+      <Row label="Tipo">
+        <select
+          className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg2 px-2 py-1 text-[12px] text-ink"
+          value={clip.transition_in ? "fade" : ""}
+          onChange={(e) =>
+            void setClipTransition(
+              clip.id,
+              e.target.value === "fade"
+                ? { effect_id: "core.crossfade", duration: 500_000, params: {} }
+                : null,
+            )
+          }
+        >
+          <option value="">Corte (ninguna)</option>
+          <option value="fade">Fundido cruzado</option>
+        </select>
+      </Row>
+      {clip.transition_in && (
+        <Row label="Duración">
+          <Slider
+            value={durS}
+            min={0.1}
+            max={2}
+            step={0.05}
+            unit=" s"
+            onChange={(v) =>
+              void setClipTransition(clip.id, {
+                ...clip.transition_in!,
+                duration: Math.round(v * 1e6),
+              })
+            }
+          />
+        </Row>
+      )}
+      <p className="mt-1 text-[10px] leading-snug text-ink-faint">
+        Necesita material extra a ambos lados del corte; si no lo hay, se reduce.
+      </p>
+    </Section>
   );
 }
 

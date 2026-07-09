@@ -35,6 +35,7 @@ pub enum Action {
     SetClipTransform { clip_id: Id, transform: Transform2D },
     SetClipAudio { clip_id: Id, audio: AudioProps },
     SetClipEffects { clip_id: Id, effects: Vec<EffectInstance> },
+    SetClipTransition { clip_id: Id, transition: Option<TransitionRef> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +292,15 @@ pub fn apply(project: &mut Project, action: Action) -> UeResult<Action> {
             let clip = &mut project.sequences[si].tracks[ti].clips[ci];
             let old = std::mem::replace(&mut clip.effects, effects);
             Ok(Action::SetClipEffects { clip_id, effects: old })
+        }
+
+        Action::SetClipTransition { clip_id, transition } => {
+            let (si, ti, ci) = project
+                .locate_clip(clip_id)
+                .ok_or_else(|| UeError::NotFound(format!("clip {clip_id}")))?;
+            let clip = &mut project.sequences[si].tracks[ti].clips[ci];
+            let old = std::mem::replace(&mut clip.transition_in, transition);
+            Ok(Action::SetClipTransition { clip_id, transition: old })
         }
     }
 }

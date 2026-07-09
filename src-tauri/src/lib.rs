@@ -71,7 +71,7 @@ fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, runnin
         };
         let path = PathBuf::from(&r.asset_path);
         let src_t = r.src_t_us;
-        let vf = ue_render::render_chain(effects_registry(), &r.effects);
+        let vf = ue_render::clip_vf(effects_registry(), &r.effects, &r.transform);
 
         // ¿sirve la sesión actual? (mismo archivo, misma cadena de efectos,
         // posición alcanzable hacia delante)
@@ -461,7 +461,7 @@ fn render_frame(
         (store.project.clone(), store.project.active_sequence, base)
     }; // soltar el lock antes de invocar ffmpeg
     let vf = ue_media::frame::resolve_top_video(&project, seq_id, t_us)
-        .and_then(|r| ue_render::render_chain(effects_registry(), &r.effects));
+        .and_then(|r| ue_render::clip_vf(effects_registry(), &r.effects, &r.transform));
     let bytes =
         ue_media::frame::render_frame(&project, seq_id, t_us, max_width, &base_dir, vf.as_deref())
             .map_err(|e| e.to_string())?
@@ -487,6 +487,23 @@ fn set_clip_effects(
         .dispatch(
             "Editar efectos",
             vec![ue_core::Action::SetClipEffects { clip_id: id, effects }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+#[tauri::command]
+fn set_clip_transition(
+    state: State<AppState>,
+    clip_id: String,
+    transition: Option<ue_core::model::TransitionRef>,
+) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&clip_id)?;
+    store
+        .dispatch(
+            "Editar transición",
+            vec![ue_core::Action::SetClipTransition { clip_id: id, transition }],
         )
         .map_err(|e| e.to_string())?;
     Ok(snapshot(&store))
@@ -617,6 +634,7 @@ pub fn run() {
             render_frame,
             get_effects_catalog,
             set_clip_effects,
+            set_clip_transition,
             export_video,
             cancel_export,
             playback_play,

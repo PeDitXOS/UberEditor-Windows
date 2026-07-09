@@ -20,6 +20,7 @@ import type {
   TimeUs,
   Track,
   Transform2D,
+  TransitionRef,
 } from "./types";
 import { DEFAULT_AUDIO, DEFAULT_TEXT_STYLE, DEFAULT_TRANSFORM, activeSequence } from "./types";
 
@@ -312,6 +313,14 @@ export class MockEngine implements EngineClient {
       const found = this.locate(clipId);
       if (!found) throw new Error("clip no encontrado");
       found.clip.effects = effects;
+    });
+  }
+
+  async setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot> {
+    return this.transaction("Editar transición", () => {
+      const found = this.locate(clipId);
+      if (!found) throw new Error("clip no encontrado");
+      found.clip.transition_in = transition;
     });
   }
 

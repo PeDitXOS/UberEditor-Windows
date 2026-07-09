@@ -14,8 +14,11 @@ pub enum Segment {
         asset_id: Id,
         src_in: TimeUs,
         src_out: TimeUs,
-        /// Cadena de efectos del clip (ue-render), ya renderizada.
+        /// Cadena de efectos+transform del clip (ue-render), ya renderizada.
         vf: Option<String>,
+        /// Crossfade con el tramo anterior: duración (µs). Los handles ya
+        /// están extendidos en src_in/src_out por el post-pass de la EDL.
+        transition_in: Option<TimeUs>,
     },
     Black { duration: TimeUs },
 }
@@ -75,11 +78,18 @@ pub fn build_video_edl(project: &Project, sequence_id: Id) -> ExportResult<Vec<S
                             return Err(ExportError::MissingAsset(*asset_id));
                         }
                         let s_in = *src_in + (a - clip.start);
+                        // la transición pertenece al PRIMER tramo del clip
+                        let transition_in = if a == clip.start {
+                            clip.transition_in.as_ref().map(|t| t.duration)
+                        } else {
+                            None
+                        };
                         found = Some(Segment::Source {
                             asset_id: *asset_id,
                             src_in: s_in,
                             src_out: s_in + (b - a),
-                            vf: ue_render::render_chain(&registry, &clip.effects),
+                            vf: ue_render::clip_vf(&registry, &clip.effects, &clip.transform),
+                            transition_in,
                         });
                     }
                     break;
@@ -100,13 +110,20 @@ pub fn build_video_edl(project: &Project, sequence_id: Id) -> ExportResult<Vec<S
         return Err(ExportError::EmptyTimeline);
     }
 
-    // fusionar tramos contiguos del mismo asset con fuente continua y mismos efectos
+    // fusionar tramos contiguos del mismo asset con fuente continua, mismos
+    // efectos y sin transición de por medio
     let mut merged: Vec<Segment> = vec![];
     for seg in segments {
         match (merged.last_mut(), &seg) {
             (
                 Some(Segment::Source { asset_id: a1, src_out: o1, vf: v1, .. }),
-                Segment::Source { asset_id: a2, src_in: i2, src_out: o2, vf: v2 },
+                Segment::Source {
+                    asset_id: a2,
+                    src_in: i2,
+                    src_out: o2,
+                    vf: v2,
+                    transition_in: None,
+                },
             ) if a1 == a2 && o1 == i2 && v1 == v2 => *o1 = *o2,
             (Some(Segment::Black { duration: d1 }), Segment::Black { duration: d2 }) => {
                 *d1 += *d2;
@@ -114,10 +131,71 @@ pub fn build_video_edl(project: &Project, sequence_id: Id) -> ExportResult<Vec<S
             _ => merged.push(seg),
         }
     }
+
+    apply_transition_handles(project, &mut merged);
     Ok(merged)
 }
 
-/// Duración total de la EDL en µs.
+/// Duración total de SALIDA de la EDL en µs (los crossfades solapan material,
+/// así que restan su duración).
 pub fn edl_duration(segments: &[Segment]) -> TimeUs {
-    segments.iter().map(|s| s.duration()).sum()
+    let raw: TimeUs = segments.iter().map(|s| s.duration()).sum();
+    let overlapped: TimeUs = segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Source { transition_in: Some(d), .. } => Some(*d),
+            _ => None,
+        })
+        .sum();
+    raw - overlapped
+}
+
+/// Post-pass de transiciones: valida que haya un tramo Source contiguo antes,
+/// extiende los handles (mitad a cada lado, limitado por el material del
+/// archivo) y reduce o elimina la transición si no hay material suficiente.
+fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
+    const MIN_TRANSITION: TimeUs = 40_000; // por debajo de ~1 frame no vale la pena
+    for i in 0..segments.len() {
+        let Segment::Source { transition_in: Some(want), src_in: cur_in, .. } = &segments[i]
+        else {
+            continue;
+        };
+        let (want, cur_in) = (*want, *cur_in);
+        // sin tramo Source justo antes → sin transición
+        if i == 0 {
+            if let Segment::Source { transition_in, .. } = &mut segments[i] {
+                *transition_in = None;
+            }
+            continue;
+        }
+        let (avail_left, prev_is_source) = match &segments[i - 1] {
+            Segment::Source { asset_id, src_out, .. } => {
+                let dur = project.asset(*asset_id).map(|a| a.probe.duration_us).unwrap_or(0);
+                ((dur - src_out).max(0), true)
+            }
+            _ => (0, false),
+        };
+        if !prev_is_source {
+            if let Segment::Source { transition_in, .. } = &mut segments[i] {
+                *transition_in = None;
+            }
+            continue;
+        }
+        let avail_right = cur_in; // material antes del inicio del clip derecho
+        let half = (want / 2).min(avail_left).min(avail_right);
+        let effective = half * 2;
+        if effective < MIN_TRANSITION {
+            if let Segment::Source { transition_in, .. } = &mut segments[i] {
+                *transition_in = None;
+            }
+            continue;
+        }
+        if let Segment::Source { src_out, .. } = &mut segments[i - 1] {
+            *src_out += half;
+        }
+        if let Segment::Source { src_in, transition_in, .. } = &mut segments[i] {
+            *src_in -= half;
+            *transition_in = Some(effective);
+        }
+    }
 }

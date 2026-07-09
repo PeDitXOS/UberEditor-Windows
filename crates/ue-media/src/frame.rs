@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use ue_core::model::{ClipPayload, EffectInstance, Id, Project, TrackKind};
+use ue_core::model::{ClipPayload, EffectInstance, Id, Project, TrackKind, Transform2D};
 use ue_core::TimeUs;
 
 use crate::{ffmpeg_bin, MediaError, MediaResult};
@@ -15,8 +15,9 @@ use crate::{ffmpeg_bin, MediaError, MediaResult};
 pub struct ResolvedFrame {
     pub asset_path: String,
     pub src_t_us: TimeUs,
-    /// Efectos del clip resuelto (la capa superior decide qué cadena aplicar).
+    /// Efectos y transform del clip resuelto (la capa superior decide la cadena).
     pub effects: Vec<EffectInstance>,
+    pub transform: Transform2D,
 }
 
 /// Resuelve qué asset y qué instante fuente corresponden al tiempo `t_us`
@@ -38,6 +39,7 @@ pub fn resolve_top_video(project: &Project, sequence_id: Id, t_us: TimeUs) -> Op
                         asset_path: asset.path.clone(),
                         src_t_us: src_t,
                         effects: clip.effects.clone(),
+                        transform: clip.transform.clone(),
                     });
                 }
             }

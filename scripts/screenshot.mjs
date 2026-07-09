@@ -80,7 +80,7 @@ await shot("06-tras-reproducir");
 // 7. Efectos modulares: seleccionar clip y añadir chroma key desde el Inspector
 await page.mouse.click(xForSec(4), box.y + 26 + 2 + 54 + 26);
 await page.waitForTimeout(200);
-const effectSelect = page.locator("select");
+const effectSelect = page.locator("select").filter({ hasText: "Añadir efecto" });
 await effectSelect.selectOption("core.chroma_key");
 await page.waitForTimeout(200);
 const chromaVisible = await page.getByText("Chroma Key").count();

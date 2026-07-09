@@ -81,10 +81,10 @@ fn edl_with_gap_and_two_sources() {
     assert_eq!(
         edl,
         vec![
-            Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 3 * SEC, vf: None },
-            Segment::Source { asset_id: b, src_in: 4 * SEC, src_out: 6 * SEC, vf: None },
+            Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 3 * SEC, vf: None, transition_in: None },
+            Segment::Source { asset_id: b, src_in: 4 * SEC, src_out: 6 * SEC, vf: None, transition_in: None },
             Segment::Black { duration: 1 * SEC },
-            Segment::Source { asset_id: a, src_in: 8 * SEC, src_out: 9 * SEC, vf: None },
+            Segment::Source { asset_id: a, src_in: 8 * SEC, src_out: 9 * SEC, vf: None, transition_in: None },
         ]
     );
     assert_eq!(edl_duration(&edl), 6 * SEC);
@@ -101,9 +101,9 @@ fn edl_top_track_wins() {
     assert_eq!(
         edl,
         vec![
-            Segment::Source { asset_id: a, src_in: 0, src_out: 2 * SEC, vf: None },
-            Segment::Source { asset_id: b, src_in: 0, src_out: 2 * SEC, vf: None },
-            Segment::Source { asset_id: a, src_in: 4 * SEC, src_out: 6 * SEC, vf: None },
+            Segment::Source { asset_id: a, src_in: 0, src_out: 2 * SEC, vf: None, transition_in: None },
+            Segment::Source { asset_id: b, src_in: 0, src_out: 2 * SEC, vf: None, transition_in: None },
+            Segment::Source { asset_id: a, src_in: 4 * SEC, src_out: 6 * SEC, vf: None, transition_in: None },
         ]
     );
 }
@@ -117,7 +117,7 @@ fn edl_merges_contiguous_and_trims_trailing_black() {
     let edl = build_video_edl(&store.project, seq).unwrap();
     assert_eq!(
         edl,
-        vec![Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 5 * SEC, vf: None }]
+        vec![Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 5 * SEC, vf: None, transition_in: None }]
     );
 }
 
@@ -437,4 +437,144 @@ fn chroma_key_effect_applies_in_export() {
     let (r, g, _b) = pixel_at(&out2, 1.0, 100, 540);
     assert!(g > 150 && r < 90, "control sin efecto: sigue verde");
     let _ = &mut store2;
+}
+
+// ---------------------------------------------------------------------------
+// Transiciones (crossfade)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transition_extends_handles_and_survives_edl() {
+    let (mut store, seq, v1, _v2, _a1, a, b) = project_two_video_tracks();
+    // A usa [1..3) del archivo (hay material después); B usa [4..6) (hay antes)
+    store.insert_clip(v1, Clip::new_media(a, 1 * SEC, 3 * SEC, 0), InsertMode::Strict).unwrap();
+    let clip_b = Clip::new_media(b, 4 * SEC, 6 * SEC, 2 * SEC);
+    let b_id = clip_b.id;
+    store.insert_clip(v1, clip_b, InsertMode::Strict).unwrap();
+    store
+        .dispatch(
+            "transición",
+            vec![ue_core::Action::SetClipTransition {
+                clip_id: b_id,
+                transition: Some(TransitionRef {
+                    effect_id: "core.crossfade".into(),
+                    duration: 1 * SEC,
+                    params: Default::default(),
+                }),
+            }],
+        )
+        .unwrap();
+
+    let edl = build_video_edl(&store.project, seq).unwrap();
+    assert_eq!(edl.len(), 2);
+    // handles: A extendida +0.5s, B adelantada -0.5s, transición efectiva 1s
+    match (&edl[0], &edl[1]) {
+        (
+            Segment::Source { src_in: a_in, src_out: a_out, .. },
+            Segment::Source { src_in: b_in, src_out: b_out, transition_in, .. },
+        ) => {
+            assert_eq!((*a_in, *a_out), (1 * SEC, 3 * SEC + 500_000));
+            assert_eq!((*b_in, *b_out), (4 * SEC - 500_000, 6 * SEC));
+            assert_eq!(*transition_in, Some(1 * SEC));
+        }
+        other => panic!("EDL inesperada: {other:?}"),
+    }
+    // la duración de salida no cambia: 4 s
+    assert_eq!(edl_duration(&edl), 4 * SEC);
+
+    // sin material suficiente (clip A pegado al final del archivo) → se reduce
+    let (mut store2, seq2, v1b, _v, _a, a2, b2) = project_two_video_tracks();
+    store2.insert_clip(v1b, Clip::new_media(a2, 8 * SEC, 10 * SEC, 0), InsertMode::Strict).unwrap();
+    let cb = Clip::new_media(b2, 4 * SEC, 6 * SEC, 2 * SEC);
+    let cb_id = cb.id;
+    store2.insert_clip(v1b, cb, InsertMode::Strict).unwrap();
+    store2
+        .dispatch(
+            "transición",
+            vec![ue_core::Action::SetClipTransition {
+                clip_id: cb_id,
+                transition: Some(TransitionRef {
+                    effect_id: "core.crossfade".into(),
+                    duration: 1 * SEC,
+                    params: Default::default(),
+                }),
+            }],
+        )
+        .unwrap();
+    let edl2 = build_video_edl(&store2.project, seq2).unwrap();
+    match &edl2[1] {
+        Segment::Source { transition_in, .. } => {
+            assert_eq!(*transition_in, None, "sin handle a la izquierda → sin transición");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Rojo→azul con crossfade de 1 s: la duración total se conserva y el punto
+/// medio de la transición es una mezcla de ambos.
+#[test]
+fn crossfade_export_blends_and_keeps_duration() {
+    let Some(dir) = media_dir() else { return };
+    for (name, color) in [("red.mp4", "red"), ("blue.mp4", "blue")] {
+        let st = Command::new(ue_media::ffmpeg_bin())
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("color=c={color}:s=640x360:d=4:r=30"))
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .arg(dir.join(name))
+            .status()
+            .unwrap();
+        assert!(st.success());
+    }
+    let mut project = Project::new("xfade-test");
+    let seq_id = project.active_sequence;
+    let red = ue_media::import_file(&dir.join("red.mp4")).unwrap();
+    let blue = ue_media::import_file(&dir.join("blue.mp4")).unwrap();
+    let (rid, bid) = (red.id, blue.id);
+    project.assets.push(red);
+    project.assets.push(blue);
+    let v1 = project
+        .sequence(seq_id)
+        .unwrap()
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video)
+        .unwrap()
+        .id;
+    let mut store = ProjectStore::new(project);
+    // rojo [0.5..3.5) en t=0; azul [0.5..3.5) en t=3 → hay handles a ambos lados
+    store.insert_clip(v1, Clip::new_media(rid, 500_000, 3_500_000, 0), InsertMode::Strict).unwrap();
+    let cb = Clip::new_media(bid, 500_000, 3_500_000, 3 * SEC);
+    let cb_id = cb.id;
+    store.insert_clip(v1, cb, InsertMode::Strict).unwrap();
+    store
+        .dispatch(
+            "transición",
+            vec![ue_core::Action::SetClipTransition {
+                clip_id: cb_id,
+                transition: Some(TransitionRef {
+                    effect_id: "core.crossfade".into(),
+                    duration: 1 * SEC,
+                    params: Default::default(),
+                }),
+            }],
+        )
+        .unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-xfade-out.mp4");
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+
+    let meta = ffprobe_json(&out);
+    let dur: f64 = meta["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!((5.9..=6.2).contains(&dur), "6 s exactos pese al crossfade, fue {dur}");
+
+    // t=1.5: rojo puro; t=4.5: azul puro; t=3.0 (centro de la transición): mezcla
+    let (r, _g, b) = pixel_at(&out, 1.5, 960, 540);
+    assert!(r > 180 && b < 60, "rojo puro, fue r={r} b={b}");
+    let (r, _g, b) = pixel_at(&out, 4.5, 960, 540);
+    assert!(b > 180 && r < 60, "azul puro, fue r={r} b={b}");
+    let (r, _g, b) = pixel_at(&out, 3.0, 960, 540);
+    assert!(
+        (50..=200).contains(&(r as i32)) && (50..=200).contains(&(b as i32)),
+        "mezcla en el centro del fundido, fue r={r} b={b}"
+    );
 }

@@ -6,6 +6,7 @@ import type {
   StateSnapshot,
   TimeUs,
   Transform2D,
+  TransitionRef,
 } from "./types";
 
 /**
@@ -70,6 +71,7 @@ export interface EngineClient {
   // -- efectos modulares --
   getEffectsCatalog(): Promise<EffectDef[]>;
   setClipEffects(clipId: Id, effects: EffectInstance[]): Promise<StateSnapshot>;
+  setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot>;
 
   // -- progreso de export --
   cancelExport(): Promise<void>;
