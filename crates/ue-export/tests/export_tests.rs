@@ -266,6 +266,83 @@ fn export_cut_and_reordered_timeline() {
 }
 
 // ---------------------------------------------------------------------------
+// Multicapa: overlay de pistas superiores con opacidad
+// ---------------------------------------------------------------------------
+
+/// V1 rojo 4s + V2 azul [1s,3s) con opacidad 0.5 → centro: mezcla ~50/50.
+#[test]
+fn multilayer_overlay_blends_with_opacity() {
+    let Some(dir) = media_dir() else { return };
+    // fuentes de color sólido
+    for (name, color) in [("solid_red.mp4", "red"), ("solid_blue.mp4", "blue")] {
+        let out = dir.join(name);
+        if !out.exists() {
+            let st = Command::new(ue_media::ffmpeg_bin())
+                .args([
+                    "-y", "-v", "error",
+                    "-f", "lavfi", "-i",
+                    &format!("color={color}:size=640x360:rate=30:duration=4"),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                ])
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+    }
+    let mut project = Project::new("multicapa");
+    let seq_id = project.active_sequence;
+    let red = ue_media::import_file(&dir.join("solid_red.mp4")).unwrap();
+    let blue = ue_media::import_file(&dir.join("solid_blue.mp4")).unwrap();
+    let (red_id, blue_id) = (red.id, blue.id);
+    project.assets.push(red);
+    project.assets.push(blue);
+    let mut store = ProjectStore::new(project);
+    // añadir V2 encima de V1
+    let (seq_idx_len, v2) = {
+        let seq = store.project.sequence(seq_id).unwrap();
+        (seq.tracks.len(), ue_core::model::Track::new(TrackKind::Video, "V2"))
+    };
+    let v2_id = v2.id;
+    store
+        .dispatch(
+            "V2",
+            vec![ue_core::Action::AddTrack { sequence_id: seq_id, index: seq_idx_len, track: v2 }],
+        )
+        .unwrap();
+    let vids: Vec<Id> = store
+        .project
+        .sequence(seq_id)
+        .unwrap()
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(vids[1], v2_id);
+    store.insert_clip(vids[0], Clip::new_media(red_id, 0, 4 * SEC, 0), InsertMode::Strict).unwrap();
+    let mut top = Clip::new_media(blue_id, 0, 2 * SEC, 1 * SEC);
+    top.transform.opacity = 0.5.into();
+    store.insert_clip(vids[1], top, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-multicapa.mp4");
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+
+    let meta = ffprobe_json(&out);
+    let dur: f64 = meta["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!((3.9..=4.2).contains(&dur), "dura lo que la base (4 s), fue {dur}");
+    let (r, _g, b) = pixel_at(&out, 0.5, 960, 540);
+    assert!(r > 200 && b < 60, "0.5s: rojo puro, fue ({r},{b})");
+    let (r, _g, b) = pixel_at(&out, 2.0, 960, 540);
+    assert!(
+        (80..=180).contains(&(r as i32)) && (80..=180).contains(&(b as i32)),
+        "2.0s: mezcla rojo+azul al 50%, fue ({r},{b})"
+    );
+    let (r, _g, b) = pixel_at(&out, 3.5, 960, 540);
+    assert!(r > 200 && b < 60, "3.5s: rojo otra vez, fue ({r},{b})");
+}
+
+// ---------------------------------------------------------------------------
 // Audio: pan, curvas de ganancia y loudnorm
 // ---------------------------------------------------------------------------
 

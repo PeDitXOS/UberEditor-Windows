@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ue_core::model::{ClipPayload, Id, Project};
+use ue_core::model::{ClipPayload, Id, Project, TrackKind};
 use ue_core::TimeUs;
 
 use crate::edl::{build_video_edl_with, edl_duration, Segment};
@@ -460,8 +460,71 @@ pub fn build_ffmpeg_args(
     let seq = project
         .sequence(sequence_id)
         .ok_or(ExportError::NoSequence(sequence_id))?;
-    let edl = build_video_edl_with(project, sequence_id, &settings.extra_packs)?;
-    let total_us = edl_duration(&edl);
+
+    // MULTICAPA: la pista de video más baja (base) manda en la EDL; los clips
+    // media de pistas superiores se componen encima con overlay (+opacidad).
+    let video_tracks: Vec<&ue_core::model::Track> = seq
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video && !t.muted)
+        .collect();
+    let registry =
+        ue_render::merge_registries(ue_render::core_registry(), settings.extra_packs.clone());
+    let mut layer_clips: Vec<(Id, TimeUs, TimeUs, TimeUs, f64, Option<String>, f64)> = vec![];
+    for track in video_tracks.iter().skip(1) {
+        for clip in &track.clips {
+            if let ClipPayload::Media { asset_id, src_in, src_out } = &clip.payload {
+                if project.asset(*asset_id).is_none() {
+                    return Err(ExportError::MissingAsset(*asset_id));
+                }
+                let vf = ue_render::clip_vf_layer(
+                    &registry,
+                    &clip.effects,
+                    &clip.transform,
+                    Some(seq.resolution),
+                );
+                let opacity = clip.transform.opacity.eval(0).clamp(0.0, 1.0);
+                layer_clips.push((
+                    *asset_id,
+                    *src_in,
+                    *src_out,
+                    clip.start,
+                    clip.speed,
+                    vf,
+                    opacity,
+                ));
+            }
+        }
+    }
+    let multilayer = !layer_clips.is_empty();
+    let edl = if multilayer {
+        // EDL solo con la pista base: silenciar (visualmente) las superiores
+        let mut base_project = project.clone();
+        if let Some(s) = base_project.sequence_mut(sequence_id) {
+            let mut seen_base = false;
+            for t in &mut s.tracks {
+                if t.kind == TrackKind::Video && !t.muted {
+                    if seen_base {
+                        t.muted = true;
+                    }
+                    seen_base = true;
+                }
+            }
+        }
+        build_video_edl_with(&base_project, sequence_id, &settings.extra_packs)?
+    } else {
+        build_video_edl_with(project, sequence_id, &settings.extra_packs)?
+    };
+    let base_dur = edl_duration(&edl);
+    // el master dura hasta el final de la capa más larga
+    let layers_end = layer_clips
+        .iter()
+        .map(|(_, si, so, start, speed, _, _)| {
+            start + (((so - si) as f64) / speed).round() as TimeUs
+        })
+        .max()
+        .unwrap_or(0);
+    let total_us = base_dur.max(layers_end);
     let audio_items = collect_audio(project, sequence_id);
 
     let (mut out_w, mut out_h) = seq.resolution;
@@ -548,6 +611,55 @@ pub fn build_ffmpeg_args(
         }
         current = out_label;
     }
+    // si las capas duran más que la base, extender la base con negro
+    if multilayer && layers_end > base_dur {
+        fc.push(format!(
+            "color=black:size={out_w}x{out_h}:rate={fps}:duration={}[basetail]",
+            secs(layers_end - base_dur),
+        ));
+        fc.push(format!("[{current}][basetail]concat=n=2:v=1:a=0[basefull]"));
+        current = "basefull".to_string();
+    }
+
+    // ---- capas superiores: overlay en orden de pista (de abajo hacia arriba) ----
+    for (k, (asset_id, src_in, src_out, start, speed, vf, opacity)) in
+        layer_clips.iter().enumerate()
+    {
+        let idx = input_of(*asset_id, project);
+        let out_dur = ((*src_out - *src_in) as f64 / speed).round() as TimeUs;
+        let effects = match vf {
+            Some(chain) => format!("{chain},"),
+            None => String::new(),
+        };
+        // el lienzo de la secuencia puede ser mayor que el archivo: limitar al canvas
+        let fit = format!(
+            "scale='min({out_w},iw)':'min({out_h},ih)':force_original_aspect_ratio=decrease"
+        );
+        let alpha = if *opacity < 0.999 {
+            format!("format=rgba,colorchannelmixer=aa={opacity:.4},")
+        } else {
+            "format=rgba,".to_string()
+        };
+        fc.push(format!(
+            "[{idx}:v]trim=start={}:end={},setpts=(PTS-STARTPTS)/{speed}+{}/TB,{effects}{fit},{alpha}fps={fps}[ly{k}]",
+            secs(*src_in),
+            secs(*src_out),
+            secs(*start),
+        ));
+        let out_label = format!("lc{k}");
+        fc.push(format!(
+            "[{current}][ly{k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,{},{})'[{out_label}]",
+            secs(*start),
+            secs(*start + out_dur),
+        ));
+        current = out_label;
+    }
+    if multilayer {
+        // aplanar alpha acumulada antes de texto/avatares
+        fc.push(format!("[{current}]format=yuv420p[flat]"));
+        current = "flat".to_string();
+    }
+
     // avatares reactivos (movie+overlay por segmento)
     let (avatar_chains, after_avatars) =
         build_avatar_overlays(project, seq, base_dir, &current, out_w);

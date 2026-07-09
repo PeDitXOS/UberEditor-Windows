@@ -196,6 +196,16 @@ pub fn transform_vf(
     t: &ue_core::model::Transform2D,
     canvas: Option<(u32, u32)>,
 ) -> Option<String> {
+    transform_vf_ex(t, canvas, false)
+}
+
+/// Como `transform_vf`; con `transparent` el lienzo de posición y el relleno
+/// de rotación llevan alpha 0 (para componer la capa sobre otras en export).
+pub fn transform_vf_ex(
+    t: &ue_core::model::Transform2D,
+    canvas: Option<(u32, u32)>,
+    transparent: bool,
+) -> Option<String> {
     let mut parts: Vec<String> = vec![];
 
     let (l, top, r, b) = (
@@ -226,7 +236,11 @@ pub fn transform_vf(
     let deg = t.rotation.eval(0);
     if deg.abs() > 1e-4 {
         let rad = format_float(deg.to_radians());
-        parts.push(format!("rotate={rad}:ow=rotw({rad}):oh=roth({rad}):c=black"));
+        let fill = if transparent { "black@0.0" } else { "black" };
+        if transparent {
+            parts.push("format=rgba".into());
+        }
+        parts.push(format!("rotate={rad}:ow=rotw({rad}):oh=roth({rad}):c={fill}"));
     }
 
     if t.flip_h {
@@ -241,8 +255,10 @@ pub fn transform_vf(
     if let Some((cw, ch)) = canvas.filter(|_| px != 0 || py != 0) {
         static POS_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = POS_UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bg = if transparent { "black@0.0" } else { "black" };
+        let bg_fmt = if transparent { ",format=rgba" } else { "" };
         parts.push(format!(
-            "null[p{n}fg];color=c=black:s={cw}x{ch}[p{n}bg];[p{n}bg][p{n}fg]overlay=x=(W-w)/2+{px}:y=(H-h)/2+{py}:shortest=1"
+            "null[p{n}fg];color=c={bg}:s={cw}x{ch}{bg_fmt}[p{n}bg];[p{n}bg][p{n}fg]overlay=x=(W-w)/2+{px}:y=(H-h)/2+{py}:shortest=1"
         ));
     }
 
@@ -261,6 +277,21 @@ pub fn clip_vf(
     canvas: Option<(u32, u32)>,
 ) -> Option<String> {
     match (render_chain(registry, effects), transform_vf(transform, canvas)) {
+        (Some(e), Some(t)) => Some(format!("{e},{t}")),
+        (Some(e), None) => Some(e),
+        (None, Some(t)) => Some(t),
+        (None, None) => None,
+    }
+}
+
+/// Cadena de un clip como CAPA superpuesta (lienzo/rotación transparentes).
+pub fn clip_vf_layer(
+    registry: &[EffectDef],
+    effects: &[EffectInstance],
+    transform: &ue_core::model::Transform2D,
+    canvas: Option<(u32, u32)>,
+) -> Option<String> {
+    match (render_chain(registry, effects), transform_vf_ex(transform, canvas, true)) {
         (Some(e), Some(t)) => Some(format!("{e},{t}")),
         (Some(e), None) => Some(e),
         (None, Some(t)) => Some(t),
