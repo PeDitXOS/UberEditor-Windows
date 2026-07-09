@@ -333,6 +333,40 @@ export class MockEngine implements EngineClient {
     throw new Error("La edición por texto requiere la app de escritorio (npx tauri dev)");
   }
 
+  async addSubtitlesClip(clipId: Id): Promise<StateSnapshot> {
+    return this.transaction("Subtítulos automáticos", () => {
+      const found = this.locate(clipId);
+      if (!found || found.clip.payload.type !== "media") throw new Error("clip inválido");
+      const assetId = found.clip.payload.asset_id;
+      const doc = this.project.transcripts.find((t) => t.asset_id === assetId);
+      if (!doc) throw new Error("el medio no tiene transcripción");
+      const track = [...this.sequence.tracks].reverse().find((t) => t.kind === "video" && !t.locked);
+      if (!track) throw new Error("no hay pista de video");
+      const collides = track.clips.some(
+        (c) => c.start < found.clip.start + found.clip.duration && found.clip.start < c.start + c.duration,
+      );
+      if (collides) throw new Error("la pista superior está ocupada en ese rango");
+      track.clips.push({
+        id: newId("clip"),
+        payload: {
+          type: "subtitles",
+          transcript_id: doc.id,
+          style: { ...structuredClone(DEFAULT_TEXT_STYLE), size: 48, y_offset: 380 },
+          mode: "phrase",
+        },
+        start: found.clip.start,
+        duration: found.clip.duration,
+        speed: 1,
+        effects: [],
+        transform: structuredClone(DEFAULT_TRANSFORM),
+        audio: structuredClone(DEFAULT_AUDIO),
+        transition_in: null,
+        label_color: null,
+      });
+      track.clips.sort((a, b) => a.start - b.start);
+    });
+  }
+
   async transcribeAsset(): Promise<void> {
     throw new Error("Transcribir requiere la app de escritorio (npx tauri dev)");
   }

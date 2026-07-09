@@ -69,6 +69,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
   const setClipAudio = useStore((s) => s.setClipAudio);
   const setClipTransform = useStore((s) => s.setClipTransform);
   const removeSilences = useStore((s) => s.removeSilences);
+  const addSubtitlesClip = useStore((s) => s.addSubtitlesClip);
   const fps = activeSequence(project).fps;
 
   const asset =
@@ -190,6 +191,15 @@ function ClipInspector({ clip }: { clip: Clip }) {
           >
             🔇 Eliminar silencios del clip
           </button>
+          {asset.transcript && (
+            <button
+              className="focus-ring mt-1.5 w-full rounded-md border border-line bg-bg2 px-2.5 py-2 text-[12px] text-ink hover:bg-bg3"
+              onClick={() => void addSubtitlesClip(clip.id)}
+              title="Crea un clip de subtítulos automáticos (por frases) sobre este clip"
+            >
+              💬 Subtítulos automáticos
+            </button>
+          )}
         </Section>
       )}
 

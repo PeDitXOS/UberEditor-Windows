@@ -178,6 +178,10 @@ export class TauriEngine implements EngineClient {
     return invoke("cut_ranges", { sequenceId, ranges, ripple });
   }
 
+  addSubtitlesClip(clipId: Id): Promise<StateSnapshot> {
+    return invoke("add_subtitles_clip", { clipId });
+  }
+
   transcribeAsset(assetId: Id, model?: string): Promise<void> {
     return invoke("transcribe_asset", { assetId, model: model ?? null });
   }

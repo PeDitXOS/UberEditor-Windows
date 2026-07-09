@@ -63,6 +63,7 @@ export interface UiState {
   addTextClip: () => Promise<void>;
   removeSilences: (clipId: Id) => Promise<void>;
   transcribeAsset: (assetId: Id) => Promise<void>;
+  addSubtitlesClip: (clipId: Id) => Promise<void>;
   cutTimelineRanges: (ranges: [TimeUs, TimeUs][]) => Promise<void>;
   setClipText: (clipId: Id, content: string, style: TextStyle) => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
@@ -291,6 +292,9 @@ export const useStore = create<UiState>((set, get) => {
         engine.cutRanges(seqId, ranges, true),
       );
     },
+
+    addSubtitlesClip: (clipId) =>
+      run("Subtítulos automáticos", () => engine.addSubtitlesClip(clipId)),
 
     transcribeAsset: async (assetId) => {
       try {

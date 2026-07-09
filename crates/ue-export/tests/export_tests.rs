@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use ue_core::model::*;
 use ue_core::ops::InsertMode;
@@ -636,4 +636,103 @@ fn text_clips_burn_into_export() {
     };
     assert!(bright_at(2.0) >= 3, "el título es visible en t=2 ({} muestras claras)", bright_at(2.0));
     assert_eq!(bright_at(0.5), 0, "antes del título todo es negro");
+}
+
+/// Subtítulos automáticos: un TranscriptDoc con dos frases → clip Subtitles
+/// sobre video negro → cada frase aparece en su rango (banda inferior) y no fuera.
+#[test]
+fn auto_subtitles_burn_per_segment() {
+    let Some(dir) = media_dir() else { return };
+    let src = dir.join("black_subs.mp4"); // archivo propio: evita carreras con otros tests
+    let st = Command::new(ue_media::ffmpeg_bin())
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=3:r=30"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(st.success());
+
+    let mut project = Project::new("subs-test");
+    let seq_id = project.active_sequence;
+    let asset = ue_media::import_file(&src).unwrap();
+    let aid = asset.id;
+    project.assets.push(asset);
+    // transcripción sintética: "primera frase" [0.2..1.2s), "segunda" [1.8..2.6s)
+    let doc = TranscriptDoc {
+        id: Id::new(),
+        asset_id: aid,
+        language: "es".into(),
+        model: "test".into(),
+        words: vec![],
+        segments: vec![
+            ue_core::model::Segment {
+                text: "primera frase".into(),
+                start_us: 200_000,
+                end_us: 1_200_000,
+                word_range: (0, 0),
+                emotion: None,
+                volume_rms: 0.0,
+            },
+            ue_core::model::Segment {
+                text: "segunda".into(),
+                start_us: 1_800_000,
+                end_us: 2_600_000,
+                word_range: (0, 0),
+                emotion: None,
+                volume_rms: 0.0,
+            },
+        ],
+        global_avg_volume: 0.0,
+    };
+    let doc_id = doc.id;
+    project.transcripts.push(doc);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v2 = seq.tracks.last().unwrap().id;
+    let v1 = seq
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video && t.name == "V1")
+        .unwrap()
+        .id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(aid, 0, 3 * SEC, 0), InsertMode::Strict).unwrap();
+    let mut style = TextStyle::default();
+    style.size = 90.0;
+    style.y_offset = 380.0;
+    let subs = Clip {
+        id: Id::new(),
+        payload: ClipPayload::Subtitles {
+            transcript_id: doc_id,
+            style,
+            mode: SubtitleMode::Phrase,
+        },
+        start: 0,
+        duration: 3 * SEC,
+        speed: 1.0,
+        effects: vec![],
+        transform: Default::default(),
+        audio: Default::default(),
+        transition_in: None,
+        label_color: None,
+    };
+    store.insert_clip(v2, subs, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-subs-out.mp4");
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+
+    // banda de subtítulos: y = 540 + 380 = 920 (centro del texto)
+    let bright_at = |t: f64| -> usize {
+        let mut n = 0;
+        for x in (500..1400).step_by(25) {
+            let (r, g, b) = pixel_at(&out, t, x, 920);
+            if r as u32 + g as u32 + b as u32 > 380 {
+                n += 1;
+            }
+        }
+        n
+    };
+    assert!(bright_at(0.7) >= 3, "primera frase visible en t=0.7 ({})", bright_at(0.7));
+    assert_eq!(bright_at(1.5), 0, "hueco entre frases sin texto");
+    assert!(bright_at(2.2) >= 2, "segunda frase visible en t=2.2 ({})", bright_at(2.2));
 }

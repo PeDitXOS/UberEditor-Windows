@@ -91,6 +91,9 @@ export interface EngineClient {
     ripple: boolean,
   ): Promise<StateSnapshot>;
 
+  /** Crea un clip de subtítulos automáticos sobre un clip de media transcrito. */
+  addSubtitlesClip(clipId: Id): Promise<StateSnapshot>;
+
   /** Lanza la transcripción Whisper de un asset (job en segundo plano). */
   transcribeAsset(assetId: Id, model?: string): Promise<void>;
 

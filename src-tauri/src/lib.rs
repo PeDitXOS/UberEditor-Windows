@@ -543,6 +543,53 @@ fn set_clip_effects(
     Ok(snapshot(&store))
 }
 
+/// Crea un clip de subtítulos automáticos sobre un clip de media transcrito.
+#[tauri::command]
+fn add_subtitles_clip(state: State<AppState>, clip_id: String) -> Res<StateSnapshot> {
+    use ue_core::model::{ClipPayload, SubtitleMode, TextStyle};
+    let id = parse_id(&clip_id)?;
+    let mut store = state.store.lock().unwrap();
+    let media = store.project.clip(id).ok_or("clip no encontrado")?.clone();
+    let ClipPayload::Media { asset_id, .. } = media.payload else {
+        return Err("el clip no es de media".into());
+    };
+    let transcript_id = store
+        .project
+        .transcripts
+        .iter()
+        .find(|t| t.asset_id == asset_id)
+        .map(|t| t.id)
+        .ok_or("el medio no tiene transcripción; transcríbelo primero (botón T)")?;
+    let seq_id = store.project.active_sequence;
+    let seq = store.project.sequence(seq_id).ok_or("sin secuencia")?;
+    let track = seq
+        .tracks
+        .iter()
+        .rev()
+        .find(|t| t.kind == TrackKind::Video && !t.locked)
+        .ok_or("no hay pista de video desbloqueada")?;
+    let track_id = track.id;
+    if track.collides(media.start, media.duration, None) {
+        return Err("la pista superior está ocupada en ese rango (usa otra pista)".into());
+    }
+    // tercio inferior a 1080p
+    let style = TextStyle { size: 48.0, y_offset: 380.0, ..Default::default() };
+    let clip = Clip {
+        id: ue_core::model::Id::new(),
+        payload: ClipPayload::Subtitles { transcript_id, style, mode: SubtitleMode::Phrase },
+        start: media.start,
+        duration: media.duration,
+        speed: 1.0,
+        effects: vec![],
+        transform: Default::default(),
+        audio: Default::default(),
+        transition_in: None,
+        label_color: None,
+    };
+    store.insert_clip(track_id, clip, InsertMode::Strict).map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
 /// Transcribe un asset con Whisper (word-level) en segundo plano.
 /// Descarga el modelo ggml si hace falta. Al terminar emite state-changed.
 #[tauri::command]
@@ -863,6 +910,7 @@ pub fn run() {
             set_clip_text,
             remove_silences,
             transcribe_asset,
+            add_subtitles_clip,
             export_video,
             cancel_export,
             playback_play,

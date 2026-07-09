@@ -88,9 +88,55 @@ pub fn find_font() -> Option<&'static str> {
     CANDIDATES.iter().copied().find(|p| Path::new(p).exists())
 }
 
-/// Cadena drawtext para los clips de texto visibles de la secuencia.
+/// Un drawtext con estilo del proyecto, activo en [from, to) del timeline.
+fn drawtext_for(
+    font_part: &str,
+    content: &str,
+    style: &ue_core::model::TextStyle,
+    scale: f64,
+    from: TimeUs,
+    to: TimeUs,
+) -> String {
+    let fontsize = ((style.size as f64) * scale).round().max(8.0) as u32;
+    let color = style.color.trim_start_matches('#');
+    let y_off = (style.y_offset as f64 * scale).round() as i64;
+    format!(
+        "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor=0x{color}:\
+         borderw={}:bordercolor=black@0.6:x=(w-text_w)/2:y=(h-text_h)/2+{y_off}:\
+         enable='between(t,{},{})'",
+        escape_drawtext(content),
+        (2.0 * scale).round().max(1.0) as u32,
+        secs(from),
+        secs(to),
+    )
+}
+
+/// Tiempo de asset → timeline via el primer clip media que lo contiene.
+fn asset_time_to_timeline(
+    seq: &ue_core::model::Sequence,
+    asset_id: Id,
+    t_asset: TimeUs,
+) -> Option<TimeUs> {
+    use ue_core::model::ClipPayload;
+    for track in &seq.tracks {
+        for clip in &track.clips {
+            if let ClipPayload::Media { asset_id: aid, src_in, src_out } = &clip.payload {
+                if *aid == asset_id && t_asset >= *src_in && t_asset < *src_out {
+                    return Some(clip.start + (t_asset - src_in));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Cadena drawtext para títulos y subtítulos automáticos de la secuencia.
 /// El tamaño/offset del estilo está referido a 1080p y se escala a `out_h`.
-fn build_text_overlays(seq: &ue_core::model::Sequence, out_h: u32) -> Option<String> {
+fn build_text_overlays(
+    project: &Project,
+    seq: &ue_core::model::Sequence,
+    out_h: u32,
+) -> Option<String> {
     use ue_core::model::{ClipPayload, TrackKind};
     let scale = out_h as f64 / 1080.0;
     let font_part = match find_font() {
@@ -100,22 +146,44 @@ fn build_text_overlays(seq: &ue_core::model::Sequence, out_h: u32) -> Option<Str
     let mut parts: Vec<String> = vec![];
     for track in seq.tracks.iter().filter(|t| t.kind == TrackKind::Video && !t.muted) {
         for clip in &track.clips {
-            let ClipPayload::Text { content, style } = &clip.payload else { continue };
-            if content.trim().is_empty() {
-                continue;
+            match &clip.payload {
+                ClipPayload::Text { content, style } => {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
+                    parts.push(drawtext_for(
+                        &font_part,
+                        content,
+                        style,
+                        scale,
+                        clip.start,
+                        clip.end(),
+                    ));
+                }
+                ClipPayload::Subtitles { transcript_id, style, .. } => {
+                    let Some(doc) =
+                        project.transcripts.iter().find(|t| t.id == *transcript_id)
+                    else {
+                        continue;
+                    };
+                    for seg in &doc.segments {
+                        let Some(tl_start) =
+                            asset_time_to_timeline(seq, doc.asset_id, seg.start_us)
+                        else {
+                            continue; // ese trozo del asset no está en el timeline
+                        };
+                        let tl_end = tl_start + (seg.end_us - seg.start_us);
+                        // solo dentro del rango del clip de subtítulos
+                        let from = tl_start.max(clip.start);
+                        let to = tl_end.min(clip.end());
+                        if to <= from {
+                            continue;
+                        }
+                        parts.push(drawtext_for(&font_part, &seg.text, style, scale, from, to));
+                    }
+                }
+                _ => {}
             }
-            let fontsize = ((style.size as f64) * scale).round().max(8.0) as u32;
-            let color = style.color.trim_start_matches('#');
-            let y_off = (style.y_offset as f64 * scale).round() as i64;
-            parts.push(format!(
-                "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor=0x{color}:\
-                 borderw={}:bordercolor=black@0.6:x=(w-text_w)/2:y=(h-text_h)/2+{y_off}:\
-                 enable='between(t,{},{})'",
-                escape_drawtext(content),
-                (2.0 * scale).round().max(1.0) as u32,
-                secs(clip.start),
-                secs(clip.end()),
-            ));
         }
     }
     if parts.is_empty() {
@@ -217,8 +285,8 @@ pub fn build_ffmpeg_args(
         }
         current = out_label;
     }
-    // quemar títulos (clips de texto de pistas de video) sobre el video combinado
-    let text_chain = build_text_overlays(seq, out_h);
+    // quemar títulos y subtítulos sobre el video combinado
+    let text_chain = build_text_overlays(project, seq, out_h);
     match text_chain {
         Some(chain) => fc.push(format!("[{current}]{chain}[vout]")),
         None => fc.push(format!("[{current}]null[vout]")),

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { Clip, Project } from "../engine/types";
-import { activeSequence, assetName } from "../engine/types";
+import { activeSequence, activeSubtitleText, assetName } from "../engine/types";
 import { frameToUs, hash32, usToTimecode } from "../lib/time";
 import { engine, useStore } from "../state/store";
 
@@ -20,9 +20,14 @@ function activeClips(project: Project, playheadUs: number) {
     .filter((t) => t.kind === "video" && !t.muted)
     .flatMap((t) => t.clips)
     .filter((c) => c.start <= playheadUs && playheadUs < c.start + c.duration);
+  const subtitles = videoClips
+    .filter((c) => c.payload.type === "subtitles")
+    .map((c) => activeSubtitleText(project, c, playheadUs))
+    .filter((s): s is NonNullable<typeof s> => s !== null);
   return {
     video: videoClips.find((c) => c.payload.type === "media"),
     texts: videoClips.filter((c) => c.payload.type === "text"),
+    subtitles,
   };
 }
 
@@ -31,6 +36,7 @@ function drawOverlays(
   w: number,
   h: number,
   texts: Clip[],
+  subtitles: { content: string; style: { size: number; color: string; y_offset: number } }[] = [],
 ) {
   // regla de tercios, sutil
   ctx.strokeStyle = "rgba(255,255,255,0.05)";
@@ -47,6 +53,16 @@ function drawOverlays(
   }
 
   ctx.textAlign = "center";
+  for (const sub of subtitles) {
+    const size = (sub.style.size / 1080) * h;
+    const y = h / 2 + (sub.style.y_offset / 1080) * h;
+    ctx.font = `600 ${Math.round(size)}px "Inter", sans-serif`;
+    ctx.shadowColor = "rgba(0,0,0,0.85)";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = sub.style.color;
+    ctx.fillText(sub.content, w / 2, y);
+    ctx.shadowBlur = 0;
+  }
   for (const t of texts) {
     if (t.payload.type !== "text") continue;
     const content = t.payload.content;
@@ -233,7 +249,7 @@ export function Preview() {
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const { video, texts } = activeClips(project, playheadUs);
+    const { video, texts, subtitles } = activeClips(project, playheadUs);
 
     if (engine.kind === "tauri" && realFrame) {
       // frame real letterboxeado
@@ -260,7 +276,7 @@ export function Preview() {
       drawMockVideo(ctx, w, h, project, video);
       badge(ctx, w, h, "PREVIEW ½");
     }
-    drawOverlays(ctx, w, h, texts);
+    drawOverlays(ctx, w, h, texts, subtitles);
   }, [project, playheadUs, version, parentSize, realFrame]);
 
   const frameStep = (n: number) => seek(playheadUs + frameToUs(n, fps));

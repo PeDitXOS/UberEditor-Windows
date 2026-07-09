@@ -147,7 +147,7 @@ function drawClip(
   selected: boolean,
   ghost: boolean,
 ) {
-  const isText = clip.payload.type === "text";
+  const isText = clip.payload.type === "text" || clip.payload.type === "subtitles";
   const isAudio = track.kind === "audio";
   const base = isText ? COLORS.clipText : isAudio ? COLORS.clipAudio : COLORS.clipVideo;
   const hi = isText ? COLORS.clipTextHi : isAudio ? COLORS.clipAudioHi : COLORS.clipVideoHi;
@@ -217,6 +217,11 @@ function drawClip(
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText("T", x + 7, y + (h - 14) / 2 + 1);
+    if (clip.payload.type === "subtitles" && w > 60) {
+      ctx.fillStyle = "rgba(233,228,219,0.85)";
+      ctx.font = '500 10px "Inter", sans-serif';
+      ctx.fillText("Subtítulos automáticos", x + 20, y + (h - 14) / 2 + 1, w - 28);
+    }
     if (clip.payload.type === "text" && w > 60) {
       ctx.fillStyle = "rgba(233,228,219,0.85)";
       ctx.font = '500 10px "Inter", sans-serif';
