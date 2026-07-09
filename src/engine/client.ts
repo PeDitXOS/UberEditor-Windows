@@ -18,6 +18,8 @@ import type {
  */
 /** Opciones de export elegidas en el diálogo (subset de ExportSettings). */
 export interface ExportUiSettings {
+  /** Contenedor de salida. */
+  format: "mp4" | "m4a" | "gif";
   maxHeight: number | null;
   crf: number;
   preset: string;
@@ -56,7 +58,7 @@ export interface EngineClient {
   renderFrame(tUs: TimeUs, maxWidth: number): Promise<Uint8Array | null>;
 
   /** Diálogo nativo "guardar como" (null si el usuario cancela o no hay soporte). */
-  pickSavePath(defaultName: string): Promise<string | null>;
+  pickSavePath(defaultName: string, extension?: string): Promise<string | null>;
   /** Exporta la secuencia activa a MP4. Devuelve la ruta escrita. */
   exportVideo(path: string, settings?: ExportUiSettings): Promise<string>;
 

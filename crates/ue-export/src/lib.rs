@@ -37,8 +37,19 @@ pub enum ExportError {
 
 pub type ExportResult<T> = Result<T, ExportError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportFormat {
+    #[default]
+    Mp4,
+    /// Solo audio AAC en contenedor .m4a.
+    M4a,
+    /// GIF animado (paleta optimizada, sin audio).
+    Gif,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExportSettings {
+    pub format: ExportFormat,
     /// Altura máxima de salida (None = resolución de la secuencia).
     pub max_height: Option<u32>,
     pub crf: u8,
@@ -55,6 +66,7 @@ pub struct ExportSettings {
 impl Default for ExportSettings {
     fn default() -> Self {
         Self {
+            format: ExportFormat::default(),
             max_height: None,
             crf: 18,
             preset: "veryfast".into(),

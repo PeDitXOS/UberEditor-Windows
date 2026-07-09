@@ -422,6 +422,42 @@ fn range_export_trims_master() {
     assert!(meta["streams"].as_array().unwrap().iter().any(|s| s["codec_type"] == "audio"));
 }
 
+/// M4A: sin stream de video, con audio, duración de la mezcla.
+#[test]
+fn audio_only_export_m4a() {
+    let Some(dir) = media_dir() else { return };
+    let (store, seq_id) = simple_store(dir); // clip 4s con tono
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audio-only.m4a");
+    let settings =
+        ExportSettings { format: ue_export::ExportFormat::M4a, ..Default::default() };
+    export_sequence(&store.project, seq_id, dir, &out, &settings).unwrap();
+    let meta = ffprobe_json(&out);
+    let streams = meta["streams"].as_array().unwrap();
+    assert!(streams.iter().all(|s| s["codec_type"] != "video"), "sin video");
+    assert!(streams.iter().any(|s| s["codec_type"] == "audio"), "con audio");
+    let dur: f64 = meta["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!((3.8..=4.3).contains(&dur), "≈4 s, fue {dur}");
+}
+
+/// GIF: contenedor gif, ≤480 px de ancho, sin audio.
+#[test]
+fn gif_export_palette() {
+    let Some(dir) = media_dir() else { return };
+    let (store, seq_id) = simple_store(dir);
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-out.gif");
+    let settings = ExportSettings {
+        format: ue_export::ExportFormat::Gif,
+        range: Some((0, 2 * SEC)), // GIF corto
+        ..Default::default()
+    };
+    export_sequence(&store.project, seq_id, dir, &out, &settings).unwrap();
+    let meta = ffprobe_json(&out);
+    assert_eq!(meta["format"]["format_name"], "gif");
+    let v = meta["streams"].as_array().unwrap().iter().find(|s| s["codec_type"] == "video").unwrap();
+    assert!(v["width"].as_u64().unwrap() <= 480);
+    assert!(meta["streams"].as_array().unwrap().iter().all(|s| s["codec_type"] != "audio"));
+}
+
 #[test]
 fn loudnorm_flag_appends_master_filter() {
     let Some(dir) = media_dir() else { return };

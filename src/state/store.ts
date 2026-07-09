@@ -347,8 +347,9 @@ export const useStore = create<UiState>((set, get) => {
     exportProgress: null,
     exportVideo: async (settings) => {
       try {
-        const name = `${get().project.name.replace(/[^\p{L}\p{N} _-]/gu, "").trim() || "export"}.mp4`;
-        const path = await engine.pickSavePath(name);
+        const ext = settings?.format ?? "mp4";
+        const name = `${get().project.name.replace(/[^\p{L}\p{N} _-]/gu, "").trim() || "export"}.${ext}`;
+        const path = await engine.pickSavePath(name, ext);
         if (!path) {
           if (engine.kind === "mock")
             set({ lastActionLabel: "⚠ Exportar requiere la app de escritorio (npx tauri dev)" });

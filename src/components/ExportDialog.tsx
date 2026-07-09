@@ -11,13 +11,16 @@ interface Preset {
   crf: number;
   preset: string;
   audioBitrateK: number;
+  format: "mp4" | "m4a" | "gif";
 }
 
 const PRESETS: Preset[] = [
-  { name: "YouTube 1080p", hint: "H.264 · CRF 18", maxHeight: 1080, crf: 18, preset: "veryfast", audioBitrateK: 256 },
-  { name: "YouTube 4K", hint: "H.264 · CRF 17", maxHeight: 2160, crf: 17, preset: "veryfast", audioBitrateK: 320 },
-  { name: "Máxima calidad", hint: "resolución nativa · CRF 15", maxHeight: null, crf: 15, preset: "medium", audioBitrateK: 320 },
-  { name: "Borrador rápido", hint: "720p · CRF 26", maxHeight: 720, crf: 26, preset: "ultrafast", audioBitrateK: 128 },
+  { name: "YouTube 1080p", hint: "H.264 · CRF 18", maxHeight: 1080, crf: 18, preset: "veryfast", audioBitrateK: 256, format: "mp4" },
+  { name: "YouTube 4K", hint: "H.264 · CRF 17", maxHeight: 2160, crf: 17, preset: "veryfast", audioBitrateK: 320, format: "mp4" },
+  { name: "Máxima calidad", hint: "nativa · CRF 15", maxHeight: null, crf: 15, preset: "medium", audioBitrateK: 320, format: "mp4" },
+  { name: "Borrador rápido", hint: "720p · CRF 26", maxHeight: 720, crf: 26, preset: "ultrafast", audioBitrateK: 128, format: "mp4" },
+  { name: "Solo audio", hint: "AAC .m4a", maxHeight: null, crf: 18, preset: "veryfast", audioBitrateK: 256, format: "m4a" },
+  { name: "GIF", hint: "480px · 12 fps · sin audio", maxHeight: null, crf: 18, preset: "veryfast", audioBitrateK: 128, format: "gif" },
 ];
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -44,6 +47,7 @@ export function ExportDialog() {
   const [crf, setCrf] = useState(18);
   const [codecPreset, setCodecPreset] = useState("veryfast");
   const [audioK, setAudioK] = useState(256);
+  const [format, setFormat] = useState<"mp4" | "m4a" | "gif">("mp4");
   const [loudnorm, setLoudnorm] = useState(false);
   const [useRange, setUseRange] = useState(false);
 
@@ -57,8 +61,10 @@ export function ExportDialog() {
     setCrf(p.crf);
     setCodecPreset(p.preset);
     setAudioK(p.audioBitrateK);
+    setFormat(p.format);
   };
   const settings: ExportUiSettings = {
+    format,
     maxHeight,
     crf,
     preset: codecPreset,

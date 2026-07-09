@@ -88,11 +88,11 @@ export class TauriEngine implements EngineClient {
     return bytes.length > 0 ? bytes : null;
   }
 
-  async pickSavePath(defaultName: string): Promise<string | null> {
+  async pickSavePath(defaultName: string, extension = "mp4"): Promise<string | null> {
     return save({
-      title: "Exportar video",
+      title: "Exportar",
       defaultPath: defaultName,
-      filters: [{ name: "MP4", extensions: ["mp4"] }],
+      filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
     });
   }
 
@@ -106,6 +106,7 @@ export class TauriEngine implements EngineClient {
       loudnorm: settings?.loudnorm ?? null,
       rangeInUs: settings?.rangeInUs ?? null,
       rangeOutUs: settings?.rangeOutUs ?? null,
+      format: settings?.format ?? null,
     });
   }
 

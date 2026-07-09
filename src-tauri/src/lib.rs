@@ -1493,6 +1493,7 @@ async fn export_video(
     loudnorm: Option<bool>,
     range_in_us: Option<i64>,
     range_out_us: Option<i64>,
+    format: Option<String>,
 ) -> Res<String> {
     let (project, seq_id, base_dir) = {
         let store = state.store.lock().unwrap();
@@ -1514,7 +1515,14 @@ async fn export_video(
         (Some(a), Some(b)) if b > a => Some((a.max(0), b)),
         _ => None,
     };
+    let format = match format.as_deref() {
+        None | Some("mp4") => ue_export::ExportFormat::Mp4,
+        Some("m4a") => ue_export::ExportFormat::M4a,
+        Some("gif") => ue_export::ExportFormat::Gif,
+        Some(other) => return Err(format!("formato desconocido: {other}")),
+    };
     let settings = ue_export::ExportSettings {
+        format,
         max_height,
         crf: crf.map(|c| c.clamp(10, 40)).unwrap_or(defaults.crf),
         preset: preset.unwrap_or(defaults.preset),

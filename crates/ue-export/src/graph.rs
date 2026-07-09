@@ -305,6 +305,127 @@ fn asset_time_to_timeline(
     None
 }
 
+/// Plan de export SOLO AUDIO (.m4a): mezcla las cadenas de audio sin video.
+fn build_audio_only_args(
+    project: &Project,
+    sequence_id: Id,
+    base_dir: &Path,
+    output: &Path,
+    settings: &ExportSettings,
+) -> ExportResult<FfmpegPlan> {
+    let audio_items = collect_audio(project, sequence_id);
+    if audio_items.is_empty() {
+        return Err(ExportError::EmptyTimeline);
+    }
+    let total_us = audio_items
+        .iter()
+        .map(|i| i.start + (((i.src_out - i.src_in) as f64) / i.speed).round() as TimeUs)
+        .max()
+        .unwrap_or(0);
+
+    let mut input_index: BTreeMap<Id, usize> = BTreeMap::new();
+    let mut inputs: Vec<PathBuf> = vec![];
+    let mut input_of = |asset_id: Id, project: &Project| -> usize {
+        *input_index.entry(asset_id).or_insert_with(|| {
+            let asset = project.asset(asset_id).expect("validado al coleccionar");
+            inputs.push(resolve_path(base_dir, &asset.path));
+            inputs.len() - 1
+        })
+    };
+    let mut fc: Vec<String> = vec![];
+    let mut alabels: Vec<String> = vec![];
+    for (k, item) in audio_items.iter().enumerate() {
+        let idx = input_of(item.asset_id, project);
+        let label = format!("a{k}");
+        let dur_us = (((item.src_out - item.src_in) as f64) / item.speed).round() as TimeUs;
+        let mut chain = format!(
+            "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,\
+             aresample=48000,aformat=channel_layouts=stereo",
+            secs(item.src_in),
+            secs(item.src_out),
+        );
+        if (item.speed - 1.0).abs() > 1e-9 {
+            chain.push(',');
+            chain.push_str(&atempo_chain(item.speed));
+        }
+        match &item.gain_curve {
+            Some(curve) => chain.push_str(&format!(
+                ",volume=volume='{}':eval=frame",
+                volume_expr(curve, item.gain_db)
+            )),
+            None if item.gain_db.abs() > 1e-9 => {
+                chain.push_str(&format!(",volume={:.2}dB", item.gain_db));
+            }
+            None => {}
+        }
+        if item.pan.abs() > 1e-3 {
+            let (pl, pr) = ((1.0 - item.pan).min(1.0), (1.0 + item.pan).min(1.0));
+            chain.push_str(&format!(",pan=stereo|c0={pl:.4}*c0|c1={pr:.4}*c1"));
+        }
+        if item.fade_in_us > 0 {
+            chain.push_str(&format!(",afade=t=in:st=0:d={}", secs(item.fade_in_us)));
+        }
+        if item.fade_out_us > 0 {
+            chain.push_str(&format!(
+                ",afade=t=out:st={}:d={}",
+                secs(dur_us - item.fade_out_us),
+                secs(item.fade_out_us),
+            ));
+        }
+        if item.start > 0 {
+            chain.push_str(&format!(",adelay={}:all=1", item.start / 1000));
+        }
+        chain.push_str(&format!("[{label}]"));
+        fc.push(chain);
+        alabels.push(format!("[{label}]"));
+    }
+    let master = if settings.loudnorm {
+        ",loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000".to_string()
+    } else {
+        String::new()
+    };
+    fc.push(format!(
+        "{}amix=inputs={}:duration=longest:normalize=0,atrim=0:{}{}[aout]",
+        alabels.join(""),
+        alabels.len(),
+        secs(total_us),
+        master,
+    ));
+    let mut alabel = "[aout]".to_string();
+    let mut duration_us = total_us;
+    if let Some((r_in, r_out)) = settings.range {
+        let a = r_in.clamp(0, total_us);
+        let b = r_out.clamp(a, total_us);
+        if b > a {
+            fc.push(format!(
+                "[aout]atrim=start={}:end={},asetpts=PTS-STARTPTS[aoutr]",
+                secs(a),
+                secs(b)
+            ));
+            alabel = "[aoutr]".into();
+            duration_us = b - a;
+        }
+    }
+    let mut args: Vec<String> = vec!["-y".into(), "-v".into(), "error".into()];
+    for input in &inputs {
+        args.push("-i".into());
+        args.push(input.to_string_lossy().into_owned());
+    }
+    args.push("-filter_complex".into());
+    args.push(fc.join(";"));
+    args.extend(["-map".into(), alabel, "-vn".into()]);
+    args.extend([
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        format!("{}k", settings.audio_bitrate_k),
+        "-movflags".into(),
+        "+faststart".into(),
+    ]);
+    args.push(output.to_string_lossy().into_owned());
+    Ok(FfmpegPlan { args, duration_us })
+}
+
 /// Karaoke: por segmento, cada palabra en color tenue durante toda la frase y
 /// en color resaltado desde que se pronuncia hasta el final del segmento.
 /// None si no hay fontfile medible (el caller cae al modo palabra).
@@ -620,6 +741,10 @@ pub fn build_ffmpeg_args(
     let seq = project
         .sequence(sequence_id)
         .ok_or(ExportError::NoSequence(sequence_id))?;
+    let audio_only = settings.format == crate::ExportFormat::M4a;
+    if audio_only {
+        return build_audio_only_args(project, sequence_id, base_dir, output, settings);
+    }
 
     // MULTICAPA: la pista de video más baja (base) manda en la EDL; los clips
     // media de pistas superiores se componen encima con overlay (+opacidad).
@@ -833,9 +958,10 @@ pub fn build_ffmpeg_args(
         None => fc.push(format!("[{current}]null[vout]")),
     }
 
-    // ---- cadenas de audio ----
+    // ---- cadenas de audio (el GIF no lleva) ----
+    let is_gif = settings.format == crate::ExportFormat::Gif;
     let mut alabels: Vec<String> = vec![];
-    for (k, item) in audio_items.iter().enumerate() {
+    for (k, item) in audio_items.iter().enumerate().filter(|_| !is_gif) {
         let idx = input_of(item.asset_id, project);
         let label = format!("a{k}");
         let dur_us = (((item.src_out - item.src_in) as f64) / item.speed).round() as TimeUs;
@@ -914,7 +1040,7 @@ pub fn build_ffmpeg_args(
                 secs(b)
             ));
             vlabel = "[voutr]".into();
-            if has_audio {
+            if has_audio && !is_gif {
                 fc.push(format!(
                     "[aout]atrim=start={}:end={},asetpts=PTS-STARTPTS[aoutr]",
                     secs(a),
@@ -926,6 +1052,16 @@ pub fn build_ffmpeg_args(
         }
     }
 
+    // ---- GIF: paleta optimizada sobre el máster ya recortado ----
+    if is_gif {
+        fc.push(format!(
+            "{vlabel}fps=12,scale='min(480,iw)':-2:flags=lanczos,split[gifa][gifb];\
+             [gifa]palettegen=stats_mode=diff[pal];\
+             [gifb][pal]paletteuse=dither=bayer:bayer_scale=4[gifout]"
+        ));
+        vlabel = "[gifout]".into();
+    }
+
     // ---- línea de comandos ----
     let mut args: Vec<String> = vec!["-y".into(), "-v".into(), "error".into()];
     for input in &inputs {
@@ -935,27 +1071,32 @@ pub fn build_ffmpeg_args(
     args.push("-filter_complex".into());
     args.push(fc.join(";"));
     args.extend(["-map".into(), vlabel]);
-    if has_audio {
-        args.extend(["-map".into(), alabel]);
-        args.extend([
-            "-c:a".into(),
-            "aac".into(),
-            "-b:a".into(),
-            format!("{}k", settings.audio_bitrate_k),
-        ]);
-    } else {
+    if is_gif {
         args.push("-an".into());
+        args.extend(["-loop".into(), "0".into()]);
+    } else {
+        if has_audio {
+            args.extend(["-map".into(), alabel]);
+            args.extend([
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                format!("{}k", settings.audio_bitrate_k),
+            ]);
+        } else {
+            args.push("-an".into());
+        }
+        args.extend([
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            settings.preset.clone(),
+            "-crf".into(),
+            settings.crf.to_string(),
+            "-movflags".into(),
+            "+faststart".into(),
+        ]);
     }
-    args.extend([
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        settings.preset.clone(),
-        "-crf".into(),
-        settings.crf.to_string(),
-        "-movflags".into(),
-        "+faststart".into(),
-    ]);
     args.push(output.to_string_lossy().into_owned());
 
     Ok(FfmpegPlan { args, duration_us })
