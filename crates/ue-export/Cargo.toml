@@ -1,0 +1,14 @@
+[package]
+name = "ue-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+ue-core = { path = "../ue-core" }
+ue-media = { path = "../ue-media" }
+
+[dev-dependencies]
+serde_json.workspace = true

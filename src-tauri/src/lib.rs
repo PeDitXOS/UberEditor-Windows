@@ -239,6 +239,35 @@ fn render_frame(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Exporta la secuencia activa a MP4 (bloqueante en un hilo aparte).
+#[tauri::command]
+async fn export_video(
+    state: State<'_, AppState>,
+    path: String,
+    max_height: Option<u32>,
+) -> Res<String> {
+    let (project, seq_id, base_dir) = {
+        let store = state.store.lock().unwrap();
+        let base = state
+            .path
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        (store.project.clone(), store.project.active_sequence, base)
+    };
+    let out = PathBuf::from(&path);
+    let settings = ue_export::ExportSettings { max_height, ..Default::default() };
+    tauri::async_runtime::spawn_blocking(move || {
+        ue_export::export_sequence(&project, seq_id, &base_dir, &out, &settings)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(path)
+}
+
 #[tauri::command]
 fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
     let mut store = state.store.lock().unwrap();
@@ -301,6 +330,7 @@ pub fn run() {
             import_media,
             add_clip,
             render_frame,
+            export_video,
             save_project,
             open_project,
             new_project,

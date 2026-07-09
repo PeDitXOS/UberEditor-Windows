@@ -31,4 +31,9 @@ export interface EngineClient {
 
   /** Frame real JPEG del tiempo dado, o null si no hay señal / no soportado. */
   renderFrame(tUs: TimeUs, maxWidth: number): Promise<Uint8Array | null>;
+
+  /** Diálogo nativo "guardar como" (null si el usuario cancela o no hay soporte). */
+  pickSavePath(defaultName: string): Promise<string | null>;
+  /** Exporta la secuencia activa a MP4. Devuelve la ruta escrita. */
+  exportVideo(path: string): Promise<string>;
 }

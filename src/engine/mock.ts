@@ -256,6 +256,14 @@ export class MockEngine implements EngineClient {
     return null; // el mock dibuja su propio preview
   }
 
+  async pickSavePath(): Promise<string | null> {
+    return null; // solo escritorio
+  }
+
+  async exportVideo(): Promise<string> {
+    throw new Error("Exportar requiere la app de escritorio (npx tauri dev)");
+  }
+
   /** Ayuda para tests/pruebas: alterna props de pista. */
   async toggleTrack(trackId: Id, prop: "muted" | "solo" | "locked"): Promise<StateSnapshot> {
     return this.transaction("Pista", () => {

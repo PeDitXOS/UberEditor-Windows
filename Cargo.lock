@@ -3716,6 +3716,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ue-export"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "ue-core",
+ "ue-media",
+]
+
+[[package]]
 name = "ue-media"
 version = "0.1.0"
 dependencies = [
@@ -3737,6 +3748,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "ue-core",
+ "ue-export",
  "ue-media",
  "ulid",
 ]

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type { EngineClient } from "./client";
 import type { AudioProps, Id, StateSnapshot, TimeUs, Transform2D } from "./types";
@@ -74,5 +74,17 @@ export class TauriEngine implements EngineClient {
     const buf = await invoke<ArrayBuffer>("render_frame", { tUs, maxWidth });
     const bytes = new Uint8Array(buf);
     return bytes.length > 0 ? bytes : null;
+  }
+
+  async pickSavePath(defaultName: string): Promise<string | null> {
+    return save({
+      title: "Exportar video",
+      defaultPath: defaultName,
+      filters: [{ name: "MP4", extensions: ["mp4"] }],
+    });
+  }
+
+  exportVideo(path: string): Promise<string> {
+    return invoke("export_video", { path, maxHeight: null });
   }
 }

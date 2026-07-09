@@ -43,6 +43,8 @@ export interface UiState {
   setClipTransform: (clipId: Id, transform: Transform2D) => Promise<void>;
   importMedia: () => Promise<void>;
   addClipFromAsset: (assetId: Id) => Promise<void>;
+  exporting: boolean;
+  exportVideo: () => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
@@ -175,6 +177,27 @@ export const useStore = create<UiState>((set, get) => {
 
     addClipFromAsset: (assetId) =>
       run("Añadir clip", () => engine.addClip(assetId, get().playheadUs)),
+
+    exporting: false,
+    exportVideo: async () => {
+      try {
+        const name = `${get().project.name.replace(/[^\p{L}\p{N} _-]/gu, "").trim() || "export"}.mp4`;
+        const path = await engine.pickSavePath(name);
+        if (!path) {
+          if (engine.kind === "mock")
+            set({ lastActionLabel: "⚠ Exportar requiere la app de escritorio (npx tauri dev)" });
+          return;
+        }
+        set({ exporting: true, lastActionLabel: "Exportando…" });
+        const written = await engine.exportVideo(path);
+        set({ exporting: false, lastActionLabel: `Exportado a ${written}` });
+      } catch (e) {
+        set({
+          exporting: false,
+          lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    },
 
     toggleTrack: async (trackId, prop) => {
       // v0: solo el mock lo implementa; el backend real llegará con SetTrackProp

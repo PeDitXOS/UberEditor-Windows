@@ -7,6 +7,8 @@ export function Header() {
   const canRedo = useStore((s) => s.canRedo);
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
+  const exportVideo = useStore((s) => s.exportVideo);
+  const exporting = useStore((s) => s.exporting);
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-bg1 px-3">
@@ -55,8 +57,13 @@ export function Header() {
         MCP inactivo
       </span>
 
-      <button className="focus-ring rounded-md bg-accent px-3.5 py-1.5 text-[12px] font-semibold text-bg0 hover:bg-accent-deep">
-        Exportar…
+      <button
+        className="focus-ring rounded-md bg-accent px-3.5 py-1.5 text-[12px] font-semibold text-bg0 enabled:hover:bg-accent-deep disabled:opacity-60"
+        onClick={() => void exportVideo()}
+        disabled={exporting}
+        title="Exportar la secuencia a MP4"
+      >
+        {exporting ? "Exportando…" : "Exportar…"}
       </button>
     </header>
   );
