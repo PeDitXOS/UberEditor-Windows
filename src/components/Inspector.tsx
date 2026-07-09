@@ -483,6 +483,20 @@ function SubtitlesPanel({ clip }: { clip: Clip }) {
   );
 }
 
+const TRANSITION_KINDS: [string, string][] = [
+  ["core.crossfade", "Fundido cruzado"],
+  ["core.wipeleft", "Barrido ←"],
+  ["core.wiperight", "Barrido →"],
+  ["core.slideleft", "Deslizar ←"],
+  ["core.slideright", "Deslizar →"],
+  ["core.slideup", "Deslizar ↑"],
+  ["core.circleopen", "Círculo abrir"],
+  ["core.circleclose", "Círculo cerrar"],
+  ["core.dissolve", "Disolver"],
+  ["core.pixelize", "Pixelar"],
+  ["core.radial", "Radial"],
+];
+
 function TransitionPanel({ clip }: { clip: Clip }) {
   const setClipTransition = useStore((s) => s.setClipTransition);
   const durS = (clip.transition_in?.duration ?? 500_000) / 1e6;
@@ -492,18 +506,26 @@ function TransitionPanel({ clip }: { clip: Clip }) {
       <Row label="Tipo">
         <select
           className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg2 px-2 py-1 text-[12px] text-ink"
-          value={clip.transition_in ? "fade" : ""}
+          value={clip.transition_in?.effect_id ?? ""}
           onChange={(e) =>
             void setClipTransition(
               clip.id,
-              e.target.value === "fade"
-                ? { effect_id: "core.crossfade", duration: 500_000, params: {} }
+              e.target.value
+                ? {
+                    effect_id: e.target.value,
+                    duration: clip.transition_in?.duration ?? 500_000,
+                    params: {},
+                  }
                 : null,
             )
           }
         >
           <option value="">Corte (ninguna)</option>
-          <option value="fade">Fundido cruzado</option>
+          {TRANSITION_KINDS.map(([id, label]) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
         </select>
       </Row>
       {clip.transition_in && (
@@ -524,7 +546,8 @@ function TransitionPanel({ clip }: { clip: Clip }) {
         </Row>
       )}
       <p className="mt-1 text-[10px] leading-snug text-ink-faint">
-        Necesita material extra a ambos lados del corte; si no lo hay, se reduce.
+        Necesita material extra a ambos lados del corte; si no lo hay, se
+        reduce. Funciona también entre clips con velocidad distinta.
       </p>
     </Section>
   );

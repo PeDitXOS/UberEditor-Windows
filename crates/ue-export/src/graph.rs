@@ -276,6 +276,29 @@ fn build_text_overlays(
     }
 }
 
+/// Tipos de transición soportados (id nuestro → transition de xfade).
+pub const TRANSITION_KINDS: &[(&str, &str, &str)] = &[
+    ("core.crossfade", "fade", "Fundido cruzado"),
+    ("core.wipeleft", "wipeleft", "Barrido ←"),
+    ("core.wiperight", "wiperight", "Barrido →"),
+    ("core.slideleft", "slideleft", "Deslizar ←"),
+    ("core.slideright", "slideright", "Deslizar →"),
+    ("core.slideup", "slideup", "Deslizar ↑"),
+    ("core.circleopen", "circleopen", "Círculo abrir"),
+    ("core.circleclose", "circleclose", "Círculo cerrar"),
+    ("core.dissolve", "dissolve", "Disolver"),
+    ("core.pixelize", "pixelize", "Pixelar"),
+    ("core.radial", "radial", "Radial"),
+];
+
+fn xfade_kind(effect_id: &str) -> &'static str {
+    TRANSITION_KINDS
+        .iter()
+        .find(|(id, _, _)| *id == effect_id)
+        .map(|(_, kind, _)| *kind)
+        .unwrap_or("fade")
+}
+
 /// Escapado del filename del filtro movie (dentro de filter_complex).
 fn escape_movie_path(p: &str) -> String {
     p.replace('\\', "/").replace(':', "\\\\:").replace('\'', "\\\\'")
@@ -461,14 +484,15 @@ pub fn build_ffmpeg_args(
     for (k, seg) in edl.iter().enumerate().skip(1) {
         let out_label = format!("m{k}");
         let transition = match seg {
-            Segment::Source { transition_in, .. } => *transition_in,
+            Segment::Source { transition_in, .. } => transition_in.clone(),
             _ => None,
         };
         match transition {
-            Some(d) => {
+            Some((d, effect_id)) => {
                 let offset = acc_dur - d;
+                let kind = xfade_kind(&effect_id);
                 fc.push(format!(
-                    "[{current}][v{k}]xfade=transition=fade:duration={}:offset={}[{out_label}]",
+                    "[{current}][v{k}]xfade=transition={kind}:duration={}:offset={}[{out_label}]",
                     secs(d),
                     secs(offset),
                 ));

@@ -484,7 +484,7 @@ fn transition_extends_handles_and_survives_edl() {
         ) => {
             assert_eq!((*a_in, *a_out), (1 * SEC, 3 * SEC + 500_000));
             assert_eq!((*b_in, *b_out), (4 * SEC - 500_000, 6 * SEC));
-            assert_eq!(*transition_in, Some(1 * SEC));
+            assert_eq!(*transition_in, Some((1 * SEC, "core.crossfade".to_string())));
         }
         other => panic!("EDL inesperada: {other:?}"),
     }

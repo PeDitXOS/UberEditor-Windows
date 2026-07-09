@@ -18,9 +18,9 @@ pub enum Segment {
         speed: f64,
         /// Cadena de efectos+transform del clip (ue-render), ya renderizada.
         vf: Option<String>,
-        /// Crossfade con el tramo anterior: duración (µs). Los handles ya
-        /// están extendidos en src_in/src_out por el post-pass de la EDL.
-        transition_in: Option<TimeUs>,
+        /// Transición con el tramo anterior: (duración de salida µs, effect_id).
+        /// Los handles ya están extendidos en src_in/src_out por el post-pass.
+        transition_in: Option<(TimeUs, String)>,
     },
     Black { duration: TimeUs },
 }
@@ -88,9 +88,10 @@ pub fn build_video_edl_with(
                         let s_out =
                             *src_in + ((b - clip.start) as f64 * clip.speed).round() as TimeUs;
                         // la transición pertenece al PRIMER tramo del clip
-                        // (v0: sin transiciones sobre clips acelerados)
-                        let transition_in = if a == clip.start && (clip.speed - 1.0).abs() < 1e-9 {
-                            clip.transition_in.as_ref().map(|t| t.duration)
+                        let transition_in = if a == clip.start {
+                            clip.transition_in
+                                .as_ref()
+                                .map(|t| (t.duration, t.effect_id.clone()))
                         } else {
                             None
                         };
@@ -157,7 +158,7 @@ pub fn edl_duration(segments: &[Segment]) -> TimeUs {
     let overlapped: TimeUs = segments
         .iter()
         .filter_map(|s| match s {
-            Segment::Source { transition_in: Some(d), .. } => Some(*d),
+            Segment::Source { transition_in: Some((d, _)), .. } => Some(*d),
             _ => None,
         })
         .sum();
@@ -170,11 +171,16 @@ pub fn edl_duration(segments: &[Segment]) -> TimeUs {
 fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
     const MIN_TRANSITION: TimeUs = 40_000; // por debajo de ~1 frame no vale la pena
     for i in 0..segments.len() {
-        let Segment::Source { transition_in: Some(want), src_in: cur_in, .. } = &segments[i]
+        let Segment::Source {
+            transition_in: Some((want, _)),
+            src_in: cur_in,
+            speed: cur_speed,
+            ..
+        } = &segments[i]
         else {
             continue;
         };
-        let (want, cur_in) = (*want, *cur_in);
+        let (want, cur_in, cur_speed) = (*want, *cur_in, *cur_speed);
         // sin tramo Source justo antes → sin transición
         if i == 0 {
             if let Segment::Source { transition_in, .. } = &mut segments[i] {
@@ -182,22 +188,22 @@ fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
             }
             continue;
         }
-        let (avail_left, prev_is_source) = match &segments[i - 1] {
-            Segment::Source { speed, .. } if (*speed - 1.0).abs() > 1e-9 => (0, false),
-            Segment::Source { asset_id, src_out, .. } => {
+        // disponibilidad en TIEMPO DE SALIDA (asset / speed de cada lado)
+        let prev = match &segments[i - 1] {
+            Segment::Source { asset_id, src_out, speed, .. } => {
                 let dur = project.asset(*asset_id).map(|a| a.probe.duration_us).unwrap_or(0);
-                ((dur - src_out).max(0), true)
+                Some((((dur - src_out).max(0) as f64 / speed) as TimeUs, *speed))
             }
-            _ => (0, false),
+            _ => None,
         };
-        if !prev_is_source {
+        let Some((avail_left_out, prev_speed)) = prev else {
             if let Segment::Source { transition_in, .. } = &mut segments[i] {
                 *transition_in = None;
             }
             continue;
-        }
-        let avail_right = cur_in; // material antes del inicio del clip derecho
-        let half = (want / 2).min(avail_left).min(avail_right);
+        };
+        let avail_right_out = (cur_in as f64 / cur_speed) as TimeUs;
+        let half = (want / 2).min(avail_left_out).min(avail_right_out);
         let effective = half * 2;
         if effective < MIN_TRANSITION {
             if let Segment::Source { transition_in, .. } = &mut segments[i] {
@@ -206,11 +212,13 @@ fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
             continue;
         }
         if let Segment::Source { src_out, .. } = &mut segments[i - 1] {
-            *src_out += half;
+            *src_out += (half as f64 * prev_speed).round() as TimeUs;
         }
         if let Segment::Source { src_in, transition_in, .. } = &mut segments[i] {
-            *src_in -= half;
-            *transition_in = Some(effective);
+            *src_in -= (half as f64 * cur_speed).round() as TimeUs;
+            if let Some((d, _)) = transition_in {
+                *d = effective;
+            }
         }
     }
 }
