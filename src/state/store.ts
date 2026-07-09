@@ -55,6 +55,8 @@ export interface UiState {
   cancelExport: () => Promise<void>;
   saveProject: () => Promise<void>;
   openProject: () => Promise<void>;
+  newProject: () => Promise<void>;
+  relinkAsset: (assetId: Id) => Promise<void>;
   mcpPort: number | null;
   effectsCatalog: EffectDef[];
   setClipEffects: (clipId: Id, effects: EffectInstance[]) => Promise<void>;
@@ -407,6 +409,25 @@ export const useStore = create<UiState>((set, get) => {
       } catch (e) {
         set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
       }
+    },
+
+    newProject: async () => {
+      const s = get();
+      if (s.dirty && !window.confirm("Hay cambios sin guardar. ¿Descartarlos y crear un proyecto nuevo?"))
+        return;
+      try {
+        const snap = await engine.newProject("Proyecto sin título");
+        set({ selection: [], playheadUs: 0, playing: false, viewStartUs: 0 });
+        applySnapshot(snap, "Proyecto nuevo");
+      } catch (e) {
+        set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
+      }
+    },
+
+    relinkAsset: async (assetId) => {
+      const paths = await engine.pickMediaFiles();
+      if (!paths?.length) return;
+      await run("Relocalizar medio", () => engine.relinkAsset(assetId, paths[0]));
     },
 
     openProject: async () => {

@@ -91,6 +91,49 @@ function usePlayback() {
   }, [playing, engineClock]);
 }
 
+const MEDIA_EXTENSIONS = new Set([
+  "mp4", "mov", "mkv", "webm", "avi", "m4v", "mts", "mpg",
+  "wav", "mp3", "m4a", "aac", "flac", "ogg", "aiff",
+  "png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif",
+]);
+
+/** Drag & drop de archivos desde el sistema (solo escritorio). */
+function useNativeFileDrop() {
+  useEffect(() => {
+    if (engine.kind !== "tauri") return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const paths = event.payload.paths.filter((p) => {
+          const ext = p.split(".").pop()?.toLowerCase() ?? "";
+          return MEDIA_EXTENSIONS.has(ext);
+        });
+        if (!paths.length) return;
+        void (async () => {
+          try {
+            const snap = await engine.importMedia(paths);
+            useStore.setState({
+              project: snap.project,
+              version: snap.version,
+              dirty: snap.dirty,
+              canUndo: snap.can_undo,
+              canRedo: snap.can_redo,
+              lastActionLabel: `Importados ${paths.length} archivo(s) arrastrados`,
+            });
+          } catch (e) {
+            useStore.setState({
+              lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}`,
+            });
+          }
+        })();
+      });
+    })();
+    return () => unlisten?.();
+  }, []);
+}
+
 export function App() {
   const init = useStore((s) => s.init);
   const [leftTab, setLeftTab] = useState<"media" | "texto">("media");
@@ -100,6 +143,7 @@ export function App() {
   }, [init]);
   useKeyboard();
   usePlayback();
+  useNativeFileDrop();
 
   return (
     <div className="flex h-full flex-col bg-bg0">

@@ -276,3 +276,52 @@ fn unlink_breaks_group_with_undo() {
         assert_eq!(ue_core::ops::linked_ids(&store.project, v_id).len(), 2, "undo re-enlaza");
     }
 }
+
+/// Portabilidad: guardar relativiza las rutas y limpia cachés; abrir resuelve
+/// contra la carpeta del proyecto y marca offline lo que no existe.
+#[test]
+fn portable_project_roundtrip() {
+    use ue_tauri_lib::{make_portable, resolve_project_paths};
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-portable");
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    let real = dir.join("media/existe.mp4");
+    std::fs::write(&real, b"fake").unwrap();
+
+    let mut project = ue_core::model::Project::new("portable");
+    let mk = |path: String| MediaAsset {
+        id: Id::new(),
+        kind: MediaKind::Video,
+        path,
+        content_hash: "h".into(),
+        probe: ProbeInfo {
+            duration_us: SEC,
+            fps: Some((30, 1)),
+            width: 1,
+            height: 1,
+            rotation: 0,
+            vcodec: None,
+            acodec: None,
+            audio_channels: 0,
+            vfr: false,
+        },
+        proxy: Some("/tmp/cache/proxy.mp4".into()),
+        audio_conform: Some("/tmp/cache/a.wav".into()),
+        peaks: None,
+        thumbnails: None,
+        transcript: None,
+        offline: false,
+    };
+    project.assets.push(mk(real.to_string_lossy().into_owned()));
+    project.assets.push(mk("/no/existe/fuera.mp4".into()));
+
+    let portable = make_portable(&project, Some(&dir));
+    assert_eq!(portable.assets[0].path, "media/existe.mp4", "bajo el proyecto → relativa");
+    assert_eq!(portable.assets[1].path, "/no/existe/fuera.mp4", "fuera → absoluta");
+    assert!(portable.assets[0].audio_conform.is_none(), "cachés no viajan");
+
+    let mut reopened = portable.clone();
+    resolve_project_paths(&mut reopened, Some(&dir));
+    assert_eq!(reopened.assets[0].path, real.to_string_lossy(), "resuelta a absoluta");
+    assert!(!reopened.assets[0].offline, "existe → online");
+    assert!(reopened.assets[1].offline, "no existe → offline");
+}

@@ -11,6 +11,7 @@ export function Header() {
   const exporting = useStore((s) => s.exporting);
   const saveProject = useStore((s) => s.saveProject);
   const openProject = useStore((s) => s.openProject);
+  const newProject = useStore((s) => s.newProject);
   const exportProgress = useStore((s) => s.exportProgress);
   const mcpPort = useStore((s) => s.mcpPort);
   const cancelExport = useStore((s) => s.cancelExport);
@@ -35,6 +36,13 @@ export function Header() {
 
       <div className="flex-1" />
 
+      <button
+        className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim hover:bg-bg3 hover:text-ink"
+        onClick={() => void newProject()}
+        title="Proyecto nuevo (descarta el actual si no está guardado)"
+      >
+        Nuevo
+      </button>
       <button
         className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim hover:bg-bg3 hover:text-ink"
         onClick={() => void openProject()}

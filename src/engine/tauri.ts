@@ -169,6 +169,13 @@ export class TauriEngine implements EngineClient {
   ): Promise<StateSnapshot> {
     return invoke("set_subtitles_props", { clipId, style, mode });
   }
+  relinkAsset(assetId: Id, newPath: string): Promise<StateSnapshot> {
+    return invoke("relink_asset", { assetId, newPath });
+  }
+  newProject(name: string): Promise<StateSnapshot> {
+    return invoke("new_project", { name });
+  }
+
   unlinkClip(clipId: Id): Promise<StateSnapshot> {
     return invoke("unlink_clip", { clipId });
   }

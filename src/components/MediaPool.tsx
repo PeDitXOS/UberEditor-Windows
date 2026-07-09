@@ -39,6 +39,7 @@ export function MediaPool() {
   const importMedia = useStore((s) => s.importMedia);
   const addClipFromAsset = useStore((s) => s.addClipFromAsset);
   const transcribeAsset = useStore((s) => s.transcribeAsset);
+  const relinkAsset = useStore((s) => s.relinkAsset);
 
   return (
     <div className="flex h-full flex-col">
@@ -69,7 +70,14 @@ export function MediaPool() {
           >
             <AssetThumb asset={a} />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[12px] leading-tight text-ink">{assetName(a)}</div>
+              <div
+                className={`truncate text-[12px] leading-tight ${
+                  a.offline ? "text-danger" : "text-ink"
+                }`}
+              >
+                {a.offline && "⚠ "}
+                {assetName(a)}
+              </div>
               <div className="mt-0.5 font-[var(--font-mono)] text-[10px] text-ink-faint">
                 {KIND_LABEL[a.kind]}
                 {a.probe.width > 0 && ` · ${a.probe.width}×${a.probe.height}`}
@@ -77,6 +85,18 @@ export function MediaPool() {
                 {a.kind === "audio" && ` · ${usToDuration(a.probe.duration_us)}`}
                 {a.probe.vfr && " · VFR"}
               </div>
+              {a.offline && (
+                <button
+                  className="focus-ring mt-1 rounded border border-danger/60 px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void relinkAsset(a.id);
+                  }}
+                  title="El archivo no está en su ruta: selecciona su nueva ubicación"
+                >
+                  Relocalizar…
+                </button>
+              )}
             </div>
             {a.probe.audio_channels > 0 &&
               (a.transcript ? (

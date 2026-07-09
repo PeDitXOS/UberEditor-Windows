@@ -177,6 +177,40 @@ fn stop_frame_service(state: &AppState) {
     }
 }
 
+/// Copia del proyecto lista para disco: rutas de media relativas al .uep
+/// cuando sea posible y SIN cachés locales (son de esta máquina).
+pub fn make_portable(project: &Project, dir: Option<&Path>) -> Project {
+    let mut portable = project.clone();
+    for asset in &mut portable.assets {
+        if let Some(dir) = dir {
+            let p = Path::new(&asset.path);
+            if p.is_absolute() {
+                if let Ok(rel) = p.strip_prefix(dir) {
+                    asset.path = rel.to_string_lossy().into_owned();
+                }
+            }
+        }
+        asset.proxy = None;
+        asset.audio_conform = None;
+        asset.peaks = None;
+        asset.thumbnails = None;
+    }
+    portable
+}
+
+/// Resuelve rutas relativas contra la carpeta del proyecto y marca offline.
+pub fn resolve_project_paths(project: &mut Project, dir: Option<&Path>) {
+    for asset in &mut project.assets {
+        let p = Path::new(&asset.path);
+        if !p.is_absolute() {
+            if let Some(d) = dir {
+                asset.path = d.join(p).to_string_lossy().into_owned();
+            }
+        }
+        asset.offline = !Path::new(&asset.path).exists();
+    }
+}
+
 /// Ruta del WAV conformado de un asset en la caché de la app.
 fn conform_target(cache_dir: &Path, content_hash: &str) -> PathBuf {
     cache_dir.join(content_hash.replace(':', "-")).join("audio.wav")
@@ -1137,7 +1171,9 @@ fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
         Some(p) => p,
         None => return Err("no hay ruta de guardado; pasa una ruta".into()),
     };
-    let json = store.project.to_json().map_err(|e| e.to_string())?;
+    // PORTABILIDAD: serializar con rutas relativas al .uep cuando sea posible
+    let portable = make_portable(&store.project, target.parent());
+    let json = portable.to_json().map_err(|e| e.to_string())?;
     // escritura atómica: tmp + rename
     let tmp = target.with_extension("uep.tmp");
     std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
@@ -1148,16 +1184,69 @@ fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
 }
 
 #[tauri::command]
-fn open_project(state: State<AppState>, path: String) -> Res<StateSnapshot> {
+fn open_project(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> Res<StateSnapshot> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let project = Project::from_json(&json).map_err(|e| e.to_string())?;
+    let mut project = Project::from_json(&json).map_err(|e| e.to_string())?;
     let issues = ue_core::validate::validate(&project);
     if !issues.is_empty() {
         return Err(format!("proyecto inválido: {}", issues.join("; ")));
     }
+    // resolver rutas relativas contra la carpeta del .uep y marcar offline;
+    // re-derivar cachés locales por hash y relanzar conformado si falta
+    let dir = Path::new(&path).parent().map(|d| d.to_path_buf());
+    resolve_project_paths(&mut project, dir.as_deref());
+    let cache_dir = state.cache_dir.lock().unwrap().clone();
+    for asset in &mut project.assets {
+        if let Some(cache) = &cache_dir {
+            let conform = conform_target(cache, &asset.content_hash);
+            if conform.exists() {
+                asset.audio_conform = Some(conform.to_string_lossy().into_owned());
+            } else if !asset.offline && asset.probe.audio_channels > 0 {
+                spawn_conform_job(&app, asset, cache);
+            }
+        }
+    }
     let mut store = state.store.lock().unwrap();
     *store = ProjectStore::new(project);
     *state.path.lock().unwrap() = Some(PathBuf::from(path));
+    Ok(snapshot(&store))
+}
+
+/// Relocaliza un medio offline: nueva ruta, re-probe y conformado.
+#[tauri::command]
+fn relink_asset(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    asset_id: String,
+    new_path: String,
+) -> Res<StateSnapshot> {
+    let id = parse_id(&asset_id)?;
+    let fresh = ue_media::import_file(Path::new(&new_path)).map_err(|e| e.to_string())?;
+    let cache_dir = state.cache_dir.lock().unwrap().clone();
+    let mut store = state.store.lock().unwrap();
+    let asset = store
+        .project
+        .assets
+        .iter_mut()
+        .find(|a| a.id == id)
+        .ok_or("asset no encontrado")?;
+    asset.path = new_path;
+    asset.content_hash = fresh.content_hash;
+    asset.probe = fresh.probe;
+    asset.offline = false;
+    asset.audio_conform = None;
+    let asset_snapshot = asset.clone();
+    if asset_snapshot.probe.audio_channels > 0 {
+        if let Some(cache) = &cache_dir {
+            spawn_conform_job(&app, &asset_snapshot, cache);
+        }
+    }
+    store.version += 1;
+    store.dirty = true;
     Ok(snapshot(&store))
 }
 
@@ -1244,6 +1333,7 @@ pub fn run() {
             playback_frame,
             save_project,
             open_project,
+            relink_asset,
             new_project,
         ])
         .run(tauri::generate_context!())

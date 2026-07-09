@@ -481,6 +481,19 @@ export class MockEngine implements EngineClient {
     });
   }
 
+  async relinkAsset(): Promise<StateSnapshot> {
+    throw new Error("Relocalizar requiere la app de escritorio");
+  }
+  async newProject(name: string): Promise<StateSnapshot> {
+    this.project = demoProject();
+    this.project.name = name;
+    this.undoStack = [];
+    this.redoStack = [];
+    this.version += 1;
+    this.dirty = false;
+    return this.snapshot();
+  }
+
   async unlinkClip(clipId: Id): Promise<StateSnapshot> {
     return this.transaction("Desenlazar clips", () => {
       const found = this.locate(clipId);
