@@ -303,6 +303,10 @@ pub struct Clip {
     pub transition_in: Option<TransitionRef>,
     #[serde(default)]
     pub label_color: Option<String>,
+    /// Clips enlazados (video+audio del mismo medio): comparten grupo y las
+    /// operaciones (mover, dividir, recortar, borrar, velocidad) se propagan.
+    #[serde(default)]
+    pub group: Option<Id>,
 }
 
 fn default_speed() -> f64 {
@@ -322,6 +326,7 @@ impl Clip {
             audio: AudioProps::default(),
             transition_in: None,
             label_color: None,
+            group: None,
         }
     }
 
@@ -337,6 +342,7 @@ impl Clip {
             audio: AudioProps::default(),
             transition_in: None,
             label_color: None,
+            group: None,
         }
     }
 

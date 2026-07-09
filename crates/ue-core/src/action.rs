@@ -43,6 +43,7 @@ pub enum Action {
     /// Cambia la velocidad de un clip media (rate stretch: mismo material
     /// fuente, duración = fuente/velocidad). `duration` viene precalculada.
     SetClipSpeed { clip_id: Id, speed: f64, duration: TimeUs },
+    SetClipGroup { clip_id: Id, group: Option<Id> },
     AddSequence { sequence: Sequence },
     RemoveSequence { sequence_id: Id },
     SetActiveSequence { sequence_id: Id },
@@ -58,7 +59,7 @@ pub enum TrackProp {
     VolumeDb(f32),
 }
 
-/// Tipo de pista que le corresponde a un clip por su payload.
+/// Tipo de pista natural de un clip por su payload (para colocación por defecto).
 pub fn natural_track_kind(project: &Project, clip: &Clip) -> TrackKind {
     match &clip.payload {
         ClipPayload::Media { asset_id, .. } => match project.asset(*asset_id) {
@@ -69,8 +70,22 @@ pub fn natural_track_kind(project: &Project, clip: &Clip) -> TrackKind {
     }
 }
 
+/// ¿Puede este clip vivir en una pista de este tipo? Un asset de VIDEO puede
+/// ir también en una pista de audio (se usa solo su audio: clips enlazados).
+fn clip_allowed_on(project: &Project, clip: &Clip, kind: TrackKind) -> bool {
+    match &clip.payload {
+        ClipPayload::Media { asset_id, .. } => match project.asset(*asset_id).map(|a| a.kind) {
+            Some(MediaKind::Audio) => kind == TrackKind::Audio,
+            Some(MediaKind::Image) => kind == TrackKind::Video,
+            Some(MediaKind::Video) => true, // video o (solo audio) en pista de audio
+            None => true,
+        },
+        _ => kind == TrackKind::Video,
+    }
+}
+
 fn check_kind(project: &Project, track: &Track, clip: &Clip) -> UeResult<()> {
-    if natural_track_kind(project, clip) != track.kind {
+    if !clip_allowed_on(project, clip, track.kind) {
         return Err(UeError::Invalid(format!(
             "el clip {} no puede ir en una pista de tipo {:?}",
             clip.id, track.kind
@@ -317,6 +332,15 @@ pub fn apply(project: &mut Project, action: Action) -> UeResult<Action> {
                 }
                 _ => Err(UeError::Invalid("el clip no es de texto".into())),
             }
+        }
+
+        Action::SetClipGroup { clip_id, group } => {
+            let (si, ti, ci) = project
+                .locate_clip(clip_id)
+                .ok_or_else(|| UeError::NotFound(format!("clip {clip_id}")))?;
+            let clip = &mut project.sequences[si].tracks[ti].clips[ci];
+            let old = std::mem::replace(&mut clip.group, group);
+            Ok(Action::SetClipGroup { clip_id, group: old })
         }
 
         Action::SetClipSpeed { clip_id, speed, duration } => {

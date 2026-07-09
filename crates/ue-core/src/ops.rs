@@ -30,6 +30,26 @@ impl Planner {
     }
 }
 
+/// Ids del grupo enlazado de un clip (incluido él mismo).
+pub fn linked_ids(project: &Project, clip_id: Id) -> Vec<Id> {
+    let Some(clip) = project.clip(clip_id) else { return vec![clip_id] };
+    let Some(group) = clip.group else { return vec![clip_id] };
+    let mut out = vec![];
+    for seq in &project.sequences {
+        for track in &seq.tracks {
+            for c in &track.clips {
+                if c.group == Some(group) {
+                    out.push(c.id);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(clip_id);
+    }
+    out
+}
+
 fn ensure_unlocked(track: &Track) -> UeResult<()> {
     if track.locked {
         return Err(UeError::Locked(track.name.clone()));
@@ -38,15 +58,16 @@ fn ensure_unlocked(track: &Track) -> UeResult<()> {
 }
 
 /// Divide un clip en el tiempo `t` del timeline (se cuantiza a frame).
-/// Devuelve las acciones y los ids (izquierdo, derecho) resultantes.
+/// Los clips ENLAZADOS que crucen `t` se dividen también; las mitades
+/// derechas comparten un grupo nuevo. Devuelve (acciones, izq, der) del
+/// clip pedido.
 pub fn split_clip(project: &Project, clip_id: Id, t: TimeUs) -> UeResult<(Vec<Action>, Id, Id)> {
     let (si, ti, ci) = project
         .locate_clip(clip_id)
         .ok_or_else(|| UeError::NotFound(format!("clip {clip_id}")))?;
     let seq = &project.sequences[si];
-    let track = &seq.tracks[ti];
-    ensure_unlocked(track)?;
-    let clip = &track.clips[ci];
+    ensure_unlocked(&seq.tracks[ti])?;
+    let clip = &seq.tracks[ti].clips[ci];
 
     let t = quantize_to_frame(t, seq.fps);
     if t <= clip.start || t >= clip.end() {
@@ -56,18 +77,34 @@ pub fn split_clip(project: &Project, clip_id: Id, t: TimeUs) -> UeResult<(Vec<Ac
             clip.end()
         )));
     }
-    let offset = t - clip.start;
 
-    let (left, right) = split_clip_data(clip, offset);
-    let (left_id, right_id) = (left.id, right.id);
-
+    let group = linked_ids(project, clip_id);
+    let new_right_group = if group.len() > 1 { Some(Id::new()) } else { None };
     let mut plan = Planner::new(project);
-    plan.do_(Action::ReplaceClips {
-        track_id: track.id,
-        remove_ids: vec![clip_id],
-        insert: vec![left, right],
-    })?;
-    Ok((plan.finish(), left_id, right_id))
+    let mut primary: Option<(Id, Id)> = None;
+    for gid in group {
+        let Some((gsi, gti, gci)) = plan.proj.locate_clip(gid) else { continue };
+        let gclip = plan.proj.sequences[gsi].tracks[gti].clips[gci].clone();
+        let gtrack_id = plan.proj.sequences[gsi].tracks[gti].id;
+        if !(gclip.start < t && t < gclip.end()) {
+            continue; // este enlazado no cruza el corte
+        }
+        let (left, mut right) = split_clip_data(&gclip, t - gclip.start);
+        if let Some(ng) = new_right_group {
+            right.group = Some(ng);
+        }
+        let ids = (left.id, right.id);
+        plan.do_(Action::ReplaceClips {
+            track_id: gtrack_id,
+            remove_ids: vec![gid],
+            insert: vec![left, right],
+        })?;
+        if gid == clip_id {
+            primary = Some(ids);
+        }
+    }
+    let (l, r) = primary.ok_or_else(|| UeError::Invalid("nada que dividir".into()))?;
+    Ok((plan.finish(), l, r))
 }
 
 /// Construye las dos mitades de un clip partido en `offset` (µs relativos al clip).
@@ -158,6 +195,16 @@ pub fn delete_clips(project: &Project, ids: &[Id], ripple: bool) -> UeResult<Vec
     if ids.is_empty() {
         return Ok(vec![]);
     }
+    // expandir con los clips enlazados (video+audio van juntos)
+    let mut ids: Vec<Id> = ids.to_vec();
+    for id in ids.clone() {
+        for linked in linked_ids(project, id) {
+            if !ids.contains(&linked) {
+                ids.push(linked);
+            }
+        }
+    }
+    let ids = &ids;
     // Agrupar por pista y validar locks.
     let mut by_track: std::collections::BTreeMap<Id, Vec<Id>> = Default::default();
     for id in ids {
@@ -168,12 +215,8 @@ pub fn delete_clips(project: &Project, ids: &[Id], ripple: bool) -> UeResult<Vec
         ensure_unlocked(track)?;
         by_track.entry(track.id).or_default().push(*id);
     }
-    if ripple && by_track.len() > 1 {
-        return Err(UeError::Invalid(
-            "ripple delete multi-pista no soportado en v1 (selecciona clips de una sola pista)"
-                .into(),
-        ));
-    }
+    // ripple multi-pista: cada pista cierra sus propios huecos (los pares
+    // enlazados tienen huecos idénticos, así que se mantienen alineados)
 
     let mut plan = Planner::new(project);
     for (track_id, clip_ids) in by_track {
@@ -272,13 +315,38 @@ pub fn move_clip(
     ensure_unlocked(target)?;
 
     let to_start = quantize_to_frame(to_start.max(0), seq.fps);
+    let old_start = seq.tracks[ti].clips[ci].start;
     let duration = seq.tracks[ti].clips[ci].duration;
+    let delta = to_start - old_start;
 
     let mut plan = Planner::new(project);
     if mode == InsertMode::Overwrite {
         carve_range(&mut plan, to_track, to_start, to_start + duration, Some(clip_id))?;
     }
     plan.do_(Action::MoveClipToTrack { clip_id, to_track, to_start })?;
+    // los enlazados se desplazan el mismo delta en SUS pistas
+    if delta != 0 {
+        for gid in linked_ids(project, clip_id) {
+            if gid == clip_id {
+                continue;
+            }
+            let Some(gclip) = plan.proj.clip(gid) else { continue };
+            let gstart = (gclip.start + delta).max(0);
+            let gtrack = plan
+                .proj
+                .sequences
+                .iter()
+                .flat_map(|s| s.tracks.iter())
+                .find(|t| t.clip_index(gid).is_some())
+                .map(|t| t.id)
+                .unwrap();
+            if mode == InsertMode::Overwrite {
+                let gdur = gclip.duration;
+                carve_range(&mut plan, gtrack, gstart, gstart + gdur, Some(gid))?;
+            }
+            plan.do_(Action::MoveClipToTrack { clip_id: gid, to_track: gtrack, to_start: gstart })?;
+        }
+    }
     Ok(plan.finish())
 }
 

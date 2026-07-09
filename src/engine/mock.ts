@@ -393,6 +393,7 @@ export class MockEngine implements EngineClient {
       );
       if (collides) throw new Error("la pista superior está ocupada en ese rango");
       track.clips.push({
+        group: null,
         id: newId("clip"),
         payload: {
           type: "subtitles",
@@ -548,6 +549,7 @@ function mediaClip(
     audio: { ...structuredClone(DEFAULT_AUDIO), ...audioExtra },
     transition_in: null,
     label_color: null,
+    group: null,
     ...clipExtra,
   };
 }
@@ -564,6 +566,7 @@ function textClip(content: string, startS: number, durationS: number): Clip {
     audio: structuredClone(DEFAULT_AUDIO),
     transition_in: null,
     label_color: null,
+    group: null,
   };
 }
 

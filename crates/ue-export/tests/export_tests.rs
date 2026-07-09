@@ -724,6 +724,7 @@ fn auto_subtitles_burn_per_segment() {
         audio: Default::default(),
         transition_in: None,
         label_color: None,
+        group: None,
     };
     store.insert_clip(v2, subs, InsertMode::Strict).unwrap();
 
@@ -878,6 +879,7 @@ fn avatar_overlay_switches_emotion_per_segment() {
         audio: Default::default(),
         transition_in: None,
         label_color: None,
+        group: None,
     };
     store.insert_clip(v2, avatar, InsertMode::Strict).unwrap();
 
@@ -1002,6 +1004,7 @@ fn word_mode_subtitles_burn_per_word() {
         audio: Default::default(),
         transition_in: None,
         label_color: None,
+        group: None,
     };
     store.insert_clip(v2, subs, InsertMode::Strict).unwrap();
 

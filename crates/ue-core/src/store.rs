@@ -124,12 +124,29 @@ impl ProjectStore {
     }
 
     pub fn trim_clip(&mut self, clip_id: Id, left: bool, new_edge: TimeUs) -> UeResult<()> {
-        let actions = ops::trim_clip(&self.project, clip_id, left, new_edge)?;
+        // recortar también los clips enlazados al mismo borde (una transacción)
+        let mut actions = vec![];
+        for gid in ops::linked_ids(&self.project, clip_id) {
+            // planificar cada trim sobre el proyecto ACTUAL es correcto:
+            // los clips enlazados viven en pistas distintas y no interfieren
+            match ops::trim_clip(&self.project, gid, left, new_edge) {
+                Ok(a) => actions.extend(a),
+                Err(_) if gid != clip_id => continue, // enlazado no recortable: se omite
+                Err(e) => return Err(e),
+            }
+        }
         self.dispatch("Recortar clip", actions)
     }
 
     pub fn set_clip_speed(&mut self, clip_id: Id, speed: f64) -> UeResult<()> {
-        let actions = ops::set_clip_speed(&self.project, clip_id, speed)?;
+        let mut actions = vec![];
+        for gid in ops::linked_ids(&self.project, clip_id) {
+            match ops::set_clip_speed(&self.project, gid, speed) {
+                Ok(a) => actions.extend(a),
+                Err(_) if gid != clip_id => continue,
+                Err(e) => return Err(e),
+            }
+        }
         self.dispatch("Cambiar velocidad", actions)
     }
 

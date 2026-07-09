@@ -229,6 +229,15 @@ function drawClip(
     }
   }
 
+  // indicador de clip enlazado (video+audio)
+  if (clip.group && w > 30) {
+    ctx.fillStyle = "rgba(233,228,219,0.55)";
+    ctx.font = '9px "Inter", sans-serif';
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText("🔗", x + w - 4, y + 3);
+  }
+
   // etiqueta
   if (label && w > 46) {
     ctx.fillStyle = "rgba(233,228,219,0.9)";

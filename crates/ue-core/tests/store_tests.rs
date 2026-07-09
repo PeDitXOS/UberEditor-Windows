@@ -311,11 +311,20 @@ fn locked_track_rejects_ops() {
 }
 
 #[test]
-fn wrong_track_kind_rejected() {
-    let (mut store, _seq, _vt, atrack, va, _aa) = fixture();
-    let video_clip = Clip::new_media(va, 0, 2 * SEC, 0);
-    let err = store.insert_clip(atrack, video_clip, InsertMode::Strict);
-    assert!(err.is_err(), "un clip de video no entra en pista de audio");
+fn track_kind_rules() {
+    let (mut store, _seq, vtrack, atrack, va, aa) = fixture();
+    // un asset de VIDEO puede ir en pista de audio (uso solo-audio, pares enlazados)
+    let video_on_audio = Clip::new_media(va, 0, 2 * SEC, 0);
+    assert!(store.insert_clip(atrack, video_on_audio, InsertMode::Strict).is_ok());
+    // un asset de AUDIO sigue sin poder ir en pista de video
+    let audio_on_video = Clip::new_media(aa, 0, 2 * SEC, 0);
+    assert!(
+        store.insert_clip(vtrack, audio_on_video, InsertMode::Strict).is_err(),
+        "un clip de audio no entra en pista de video"
+    );
+    // un clip de texto tampoco entra en pista de audio
+    let text = Clip::new_text("hola", 5 * SEC, 1 * SEC);
+    assert!(store.insert_clip(atrack, text, InsertMode::Strict).is_err());
 }
 
 #[test]
@@ -491,4 +500,77 @@ fn move_range_forward_and_edge_cases() {
     let before = store.project.clone();
     assert!(store.move_range(seq, 0, 4 * SEC, 2 * SEC).is_err());
     assert_eq!(store.project, before);
+}
+
+#[test]
+fn linked_pair_propagates_all_operations() {
+    let (mut store, _seq, vtrack, atrack, va, _aa) = fixture();
+    // par enlazado: video en V1 + su audio en A1 (asset de video en pista de audio)
+    let group = Id::new();
+    let mut vclip = Clip::new_media(va, 0, 10 * SEC, 0);
+    vclip.group = Some(group);
+    vclip.audio.muted = true;
+    let mut aclip = Clip::new_media(va, 0, 10 * SEC, 0);
+    aclip.group = Some(group);
+    let v_id = store.insert_clip(vtrack, vclip, InsertMode::Strict).unwrap();
+    let a_id = store.insert_clip(atrack, aclip, InsertMode::Strict).unwrap();
+
+    // SPLIT: divide ambos; las mitades derechas comparten grupo NUEVO
+    let (vl, vr) = store.split_clip(v_id, 4 * SEC).unwrap();
+    let a_clips: Vec<Clip> = store.project.track(atrack).unwrap().clips.clone();
+    assert_eq!(a_clips.len(), 2, "el audio enlazado también se dividió");
+    let v_right = store.project.clip(vr).unwrap().clone();
+    let a_right = a_clips.iter().find(|c| c.start == 4 * SEC).unwrap();
+    assert_eq!(v_right.group, a_right.group, "mitades derechas re-enlazadas");
+    assert_ne!(v_right.group, Some(group), "con grupo nuevo");
+    let v_left = store.project.clip(vl).unwrap().clone();
+    assert_eq!(v_left.group, Some(group), "las izquierdas conservan el grupo");
+
+    // MOVE: mover el video derecho +5s arrastra su audio
+    store.move_clip(vr, vtrack, 9 * SEC, InsertMode::Strict).unwrap();
+    let a_right_now = store
+        .project
+        .track(atrack)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.group == v_right.group)
+        .unwrap()
+        .clone();
+    assert_eq!(a_right_now.start, 9 * SEC, "el audio siguió al video");
+
+    // TRIM: recortar el borde derecho del video recorta el audio
+    store.trim_clip(vr, false, 12 * SEC).unwrap();
+    let v_now = store.project.clip(vr).unwrap();
+    let a_now = store
+        .project
+        .track(atrack)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.group == v_right.group)
+        .unwrap();
+    assert_eq!(v_now.end(), a_now.end(), "bordes alineados tras el trim");
+
+    // SPEED: 2x en ambos
+    store.set_clip_speed(vr, 2.0).unwrap();
+    let a_now = store
+        .project
+        .track(atrack)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.group == v_right.group)
+        .unwrap();
+    assert_eq!(a_now.speed, 2.0, "velocidad propagada al audio");
+    assert_eq!(store.project.clip(vr).unwrap().duration, a_now.duration);
+
+    // DELETE con ripple: borra el par y cierra huecos en ambas pistas
+    store.delete_clips(&[vl], true).unwrap();
+    let v_clips = &store.project.track(vtrack).unwrap().clips;
+    let a_clips = &store.project.track(atrack).unwrap().clips;
+    assert_eq!(v_clips.len(), 1);
+    assert_eq!(a_clips.len(), 1);
+    assert_eq!(v_clips[0].start, a_clips[0].start, "pistas alineadas tras ripple");
+    assert!(validate(&store.project).is_empty());
 }

@@ -780,6 +780,7 @@ fn add_subtitles_clip(state: State<AppState>, clip_id: String) -> Res<StateSnaps
         audio: Default::default(),
         transition_in: None,
         label_color: None,
+        group: None,
     };
     store.insert_clip(track_id, clip, InsertMode::Strict).map_err(|e| e.to_string())?;
     Ok(snapshot(&store))
@@ -872,6 +873,7 @@ fn add_avatar_clip(state: State<AppState>, clip_id: String, config_path: String)
         audio: Default::default(),
         transition_in: None,
         label_color: None,
+        group: None,
     };
     store.insert_clip(track_id, clip, InsertMode::Strict).map_err(|e| e.to_string())?;
     Ok(snapshot(&store))

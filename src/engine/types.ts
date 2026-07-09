@@ -184,6 +184,8 @@ export interface Clip {
   audio: AudioProps;
   transition_in: TransitionRef | null;
   label_color: string | null;
+  /** clips enlazados (video+audio del mismo medio) comparten grupo */
+  group: Id | null;
 }
 
 // -- secuencia / proyecto ----------------------------------------------------
