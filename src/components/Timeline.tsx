@@ -42,6 +42,51 @@ interface DragGhost {
   edgeUs: number;
   trackIdx: number; // índice en displayTracks
   moved: boolean;
+  /** µs del objetivo al que se imantó el arrastre (guía visual), o null */
+  snapUs: number | null;
+}
+
+interface Marquee {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  additive: boolean;
+}
+
+/** Objetivos de imán: 0, playhead, rango I-O, bordes de otros clips, marcadores. */
+function snapTargets(
+  project: Project,
+  playheadUs: number,
+  range: [number | null, number | null],
+  excludeClipIds: string[],
+): number[] {
+  const seq = activeSequence(project);
+  const targets = [0, playheadUs];
+  if (range[0] != null) targets.push(range[0]);
+  if (range[1] != null) targets.push(range[1]);
+  for (const t of seq.tracks) {
+    for (const c of t.clips) {
+      if (excludeClipIds.includes(c.id)) continue;
+      targets.push(c.start, c.start + c.duration);
+    }
+  }
+  for (const m of seq.markers) targets.push(m.t);
+  return targets;
+}
+
+/** Objetivo más cercano dentro de ~8 px, o null. */
+function nearestSnap(us: number, targets: number[], pxPerSec: number): number | null {
+  let best: number | null = null;
+  let bestDist = (8 / pxPerSec) * 1e6;
+  for (const t of targets) {
+    const d = Math.abs(us - t);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best;
 }
 
 function displayTracks(project: Project): Track[] {
@@ -412,6 +457,20 @@ function drawTimeline(
     }
   }
 
+  // guía de imán durante el arrastre
+  if (ghost?.snapUs != null) {
+    const sx = usToX(ghost.snapUs);
+    ctx.save();
+    ctx.strokeStyle = "rgba(233, 228, 219, 0.85)";
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx + 0.5, RULER_H);
+    ctx.lineTo(sx + 0.5, h);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // playhead (aguja ámbar, la firma)
   const px = usToX(playheadUs);
   if (px >= -8 && px <= w + 8) {
@@ -491,6 +550,8 @@ export function Timeline() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: 240 });
   const [ghost, setGhost] = useState<DragGhost | null>(null);
+  const marqueeRef = useRef<Marquee | null>(null);
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
   const dragRef = useRef<{
     clipId: string;
     mode: DragMode;
@@ -623,7 +684,12 @@ export function Timeline() {
         edgeUs: mode === "trim-right" ? hit.clip.start + hit.clip.duration : hit.clip.start,
         trackIdx: hit.trackIdx,
         moved: false,
+        snapUs: null,
       });
+    } else if (y >= RULER_H) {
+      // selección por marco sobre área vacía
+      marqueeRef.current = { x0: x, y0: y, x1: x, y1: y, additive: e.shiftKey };
+      if (!e.shiftKey) select([]);
     } else {
       select([]);
     }
@@ -640,16 +706,43 @@ export function Timeline() {
         seek(Math.max(0, xToUs(x)));
         return;
       }
+      if (marqueeRef.current) {
+        marqueeRef.current = { ...marqueeRef.current, x1: x, y1: y };
+        setMarquee(marqueeRef.current);
+        return;
+      }
       const drag = dragRef.current;
       if (drag) {
+        // clips del grupo enlazado no son objetivos de imán del propio arrastre
+        const dragged = activeSequence(project)
+          .tracks.flatMap((t) => t.clips)
+          .find((c) => c.id === drag.clipId);
+        const exclude = dragged?.group
+          ? activeSequence(project)
+              .tracks.flatMap((t) => t.clips)
+              .filter((c) => c.group === dragged.group)
+              .map((c) => c.id)
+          : [drag.clipId];
+        const targets = e.altKey
+          ? []
+          : snapTargets(
+              useStore.getState().project,
+              useStore.getState().playheadUs,
+              [useStore.getState().rangeInUs, useStore.getState().rangeOutUs],
+              exclude,
+            );
         if (drag.mode !== "move") {
+          let edge = Math.max(0, xToUs(x));
+          const snapped = nearestSnap(edge, targets, pxPerSec);
+          if (snapped != null) edge = snapped;
           setGhost({
             clipId: drag.clipId,
             mode: drag.mode,
             startUs: 0,
-            edgeUs: Math.max(0, xToUs(x)),
+            edgeUs: edge,
             trackIdx: drag.startTrackIdx,
             moved: true,
+            snapUs: snapped,
           });
           return;
         }
@@ -662,18 +755,61 @@ export function Timeline() {
         // solo pistas del mismo tipo
         if (tracks[trackIdx].kind !== tracks[drag.startTrackIdx].kind)
           trackIdx = drag.startTrackIdx;
+        let startUs = Math.max(0, xToUs(x) - drag.grabOffsetUs);
+        let snapUs: number | null = null;
+        if (dragged) {
+          // imantar el borde más cercano (inicio o fin del clip)
+          const snapStart = nearestSnap(startUs, targets, pxPerSec);
+          const snapEnd = nearestSnap(startUs + dragged.duration, targets, pxPerSec);
+          const dStart = snapStart != null ? Math.abs(snapStart - startUs) : Infinity;
+          const dEnd =
+            snapEnd != null ? Math.abs(snapEnd - (startUs + dragged.duration)) : Infinity;
+          if (dStart <= dEnd && snapStart != null) {
+            startUs = snapStart;
+            snapUs = snapStart;
+          } else if (snapEnd != null) {
+            startUs = snapEnd - dragged.duration;
+            snapUs = snapEnd;
+          }
+          startUs = Math.max(0, startUs);
+        }
         setGhost({
           clipId: drag.clipId,
           mode: "move",
-          startUs: Math.max(0, xToUs(x) - drag.grabOffsetUs),
+          startUs,
           edgeUs: 0,
           trackIdx,
           moved: true,
+          snapUs,
         });
       }
     };
     const onUp = () => {
       scrubRef.current = false;
+      if (marqueeRef.current) {
+        const m = marqueeRef.current;
+        marqueeRef.current = null;
+        setMarquee(null);
+        if (Math.abs(m.x1 - m.x0) > 3 || Math.abs(m.y1 - m.y0) > 3) {
+          const [ax, bx] = [Math.min(m.x0, m.x1), Math.max(m.x0, m.x1)];
+          const [ay, by] = [Math.min(m.y0, m.y1), Math.max(m.y0, m.y1)];
+          const usA = xToUs(ax);
+          const usB = xToUs(bx);
+          const tracks = displayTracks(project);
+          const tops = trackTops(tracks);
+          const ids: string[] = [];
+          tracks.forEach((t, i) => {
+            const t0 = tops[i];
+            const t1 = t0 + trackHeight(t);
+            if (t1 < ay || t0 > by) return;
+            for (const c of t.clips) {
+              if (c.start < usB && c.start + c.duration > usA) ids.push(c.id);
+            }
+          });
+          select(ids, m.additive);
+        }
+        return;
+      }
       const drag = dragRef.current;
       dragRef.current = null;
       setGhost((g) => {
@@ -797,6 +933,17 @@ export function Timeline() {
           ))}
         </div>
         <div ref={containerRef} className="relative min-w-0 flex-1 overflow-hidden">
+          {marquee && (
+            <div
+              className="pointer-events-none absolute z-10 border border-(--color-accent) bg-(--color-accent)/10"
+              style={{
+                left: Math.min(marquee.x0, marquee.x1),
+                top: Math.min(marquee.y0, marquee.y1),
+                width: Math.abs(marquee.x1 - marquee.x0),
+                height: Math.abs(marquee.y1 - marquee.y0),
+              }}
+            />
+          )}
           <canvas
             id="timeline-canvas"
             ref={canvasRef}

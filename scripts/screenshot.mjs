@@ -152,5 +152,17 @@ await rangeRadio.check();
 await shot("10-dialogo-export");
 await page.getByRole("button", { name: "Cancelar" }).click();
 
+// 11. Selección por marco: arrastrar un rectángulo sobre varios clips
+await page.keyboard.press("Shift+x"); // limpiar rango I-O para no ensuciar la regla
+const tlBox = await canvas.boundingBox();
+await page.mouse.move(tlBox.x + 470, tlBox.y + tlBox.height - 8);
+await page.mouse.down();
+await page.mouse.move(tlBox.x + 160, tlBox.y + 40, { steps: 8 });
+await shot("11-marquee-seleccion");
+await page.mouse.up();
+const multiSel = await page.getByText(/clips seleccionados/).count();
+if (multiSel === 0)
+  throw new Error("la selección por marco no seleccionó varios clips (StatusBar)");
+
 await browser.close();
 console.log(`\nScreenshots en ${outDir}`);

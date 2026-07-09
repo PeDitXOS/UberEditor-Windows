@@ -5,6 +5,7 @@ export function StatusBar() {
   const project = useStore((s) => s.project);
   const lastAction = useStore((s) => s.lastActionLabel);
   const dirty = useStore((s) => s.dirty);
+  const selectionCount = useStore((s) => s.selection.length);
 
   const seq = activeSequence(project);
   const isError = lastAction?.startsWith("⚠");
@@ -12,6 +13,7 @@ export function StatusBar() {
   return (
     <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-line bg-bg1 px-3 text-[10.5px] text-ink-faint">
       <span>{dirty ? "Cambios sin guardar" : "Todo guardado"}</span>
+      {selectionCount > 1 && <span>· {selectionCount} clips seleccionados</span>}
       {lastAction && (
         <span className={isError ? "text-danger" : "text-ink-dim"}>· {lastAction}</span>
       )}
