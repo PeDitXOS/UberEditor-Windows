@@ -67,6 +67,12 @@ export interface EngineClient {
   playbackPause(): Promise<TimeUs>;
   playbackSeek(tUs: TimeUs): Promise<void>;
   /** [posición µs, reproduciendo] según el reloj de audio. */
+  /** Ruta del autosave más reciente que el proyecto, o null. */
+  checkRecovery(): Promise<string | null>;
+  /** Carga la copia de recuperación (conserva la ruta del proyecto real). */
+  recoverProject(autosave: string, original: string | null): Promise<StateSnapshot>;
+  /** Descarta la copia de recuperación activa. */
+  discardRecovery(): Promise<void>;
   /** Picos de audio reales (25 bins/s) del asset, o null si no aplica. */
   getAudioPeaks(assetId: Id): Promise<number[] | null>;
   /** Genera/recupera la tira de miniaturas del asset (solo escritorio). */

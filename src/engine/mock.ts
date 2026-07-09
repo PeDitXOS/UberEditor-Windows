@@ -276,6 +276,13 @@ export class MockEngine implements EngineClient {
     throw new Error("sin audio en navegador");
   }
   async playbackSeek(): Promise<void> {}
+  async checkRecovery(): Promise<string | null> {
+    return null;
+  }
+  async recoverProject(): Promise<StateSnapshot> {
+    throw new Error("sin recuperación en navegador");
+  }
+  async discardRecovery(): Promise<void> {}
   async getAudioPeaks(): Promise<number[] | null> {
     return null;
   }

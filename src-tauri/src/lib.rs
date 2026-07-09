@@ -184,6 +184,53 @@ fn stop_frame_service(state: &AppState) {
     }
 }
 
+/// Ruta del autosave: junto al .uep si existe, si no en app_data.
+fn autosave_path(project_path: Option<&Path>, data_dir: Option<&Path>) -> Option<PathBuf> {
+    match project_path {
+        Some(p) => Some(p.with_extension("uep.autosave")),
+        None => data_dir.map(|d| d.join("recuperacion.uep.autosave")),
+    }
+}
+
+/// Hilo de autoguardado: cada `settings.autosave_secs`, si hay cambios sin
+/// guardar escribe una copia de recuperación (atómica, portable).
+fn autosave_loop(app: tauri::AppHandle, data_dir: Option<PathBuf>) {
+    let mut last_version: u64 = 0;
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let state = app.state::<AppState>();
+        let (dirty, version, secs, project_path) = {
+            let store = state.store.lock().unwrap();
+            (
+                store.dirty,
+                store.version,
+                store.project.settings.autosave_secs.max(10) as u64,
+                state.path.lock().unwrap().clone(),
+            )
+        };
+        // respetar la cadencia configurada muestreando cada 5 s
+        static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let t = TICKS.fetch_add(5, Ordering::Relaxed) + 5;
+        if t % secs.max(5) >= 5 || !dirty || version == last_version {
+            continue;
+        }
+        let Some(target) = autosave_path(project_path.as_deref(), data_dir.as_deref()) else {
+            continue;
+        };
+        let json = {
+            let store = state.store.lock().unwrap();
+            let portable = make_portable(&store.project, target.parent());
+            portable.to_json()
+        };
+        if let Ok(json) = json {
+            let tmp = target.with_extension("autosave.tmp");
+            if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &target).is_ok() {
+                last_version = version;
+            }
+        }
+    }
+}
+
 /// Copia del proyecto lista para disco: rutas de media relativas al .uep
 /// cuando sea posible y SIN cachés locales (son de esta máquina).
 pub fn make_portable(project: &Project, dir: Option<&Path>) -> Project {
@@ -1390,6 +1437,82 @@ async fn export_video(
     Ok(path)
 }
 
+/// ¿Hay un autosave más reciente que el proyecto dado (o huérfano)? → su ruta.
+#[tauri::command]
+fn check_recovery(app: tauri::AppHandle, state: State<AppState>, path: Option<String>) -> Res<Option<String>> {
+    let data_dir = app.path().app_data_dir().ok();
+    let project_path = path.map(PathBuf::from).or_else(|| state.path.lock().unwrap().clone());
+    let Some(auto) = autosave_path(project_path.as_deref(), data_dir.as_deref()) else {
+        return Ok(None);
+    };
+    if !auto.exists() {
+        return Ok(None);
+    }
+    let newer = match &project_path {
+        Some(p) if p.exists() => {
+            let (Ok(ma), Ok(mp)) = (std::fs::metadata(&auto), std::fs::metadata(p)) else {
+                return Ok(None);
+            };
+            matches!((ma.modified(), mp.modified()), (Ok(a), Ok(b)) if a > b)
+        }
+        _ => true, // proyecto nunca guardado: cualquier autosave cuenta
+    };
+    Ok(newer.then(|| auto.display().to_string()))
+}
+
+/// Elimina el autosave activo (tras guardar o descartar la recuperación).
+#[tauri::command]
+fn discard_recovery(app: tauri::AppHandle, state: State<AppState>) -> Res<()> {
+    let data_dir = app.path().app_data_dir().ok();
+    let project_path = state.path.lock().unwrap().clone();
+    if let Some(auto) = autosave_path(project_path.as_deref(), data_dir.as_deref()) {
+        let _ = std::fs::remove_file(auto);
+    }
+    // el autosave huérfano también, por si acaba de guardarse con nombre
+    if let Some(d) = app.path().app_data_dir().ok() {
+        let _ = std::fs::remove_file(d.join("recuperacion.uep.autosave"));
+    }
+    Ok(())
+}
+
+/// Carga una copia de recuperación conservando la ruta del proyecto original
+/// (el siguiente Guardar escribe el .uep de verdad) y marcando cambios.
+#[tauri::command]
+fn recover_project(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    autosave: String,
+    original: Option<String>,
+) -> Res<StateSnapshot> {
+    let json = std::fs::read_to_string(&autosave).map_err(|e| e.to_string())?;
+    let mut project = Project::from_json(&json).map_err(|e| e.to_string())?;
+    let dir = original
+        .as_deref()
+        .and_then(|p| Path::new(p).parent().map(|d| d.to_path_buf()))
+        .or_else(|| Path::new(&autosave).parent().map(|d| d.to_path_buf()));
+    resolve_project_paths(&mut project, dir.as_deref());
+    let cache_dir = state.cache_dir.lock().unwrap().clone();
+    for asset in &mut project.assets {
+        if let Some(cache) = &cache_dir {
+            let conform = conform_target(cache, &asset.content_hash);
+            if conform.exists() {
+                asset.audio_conform = Some(conform.to_string_lossy().into_owned());
+            } else if !asset.offline && asset.probe.audio_channels > 0 {
+                spawn_conform_job(&app, asset, cache);
+            }
+            let proxy = cache.join(format!("{}.proxy.mp4", asset.content_hash));
+            if proxy.exists() {
+                asset.proxy = Some(proxy.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut store = state.store.lock().unwrap();
+    *store = ProjectStore::new(project);
+    store.dirty = true;
+    *state.path.lock().unwrap() = original.map(PathBuf::from);
+    Ok(snapshot(&store))
+}
+
 #[tauri::command]
 fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
     let mut store = state.store.lock().unwrap();
@@ -1406,6 +1529,8 @@ fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
     std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
     store.dirty = false;
+    // el guardado real invalida las copias de recuperación
+    let _ = std::fs::remove_file(target.with_extension("uep.autosave"));
     *stored_path = Some(target.clone());
     Ok(target.display().to_string())
 }
@@ -1528,6 +1653,9 @@ pub fn run() {
                 }
                 None => eprintln!("[mcp] no se pudo abrir el puerto {}", mcp::MCP_PORT),
             }
+            let data_dir = app.path().app_data_dir().ok();
+            let handle = app.handle().clone();
+            std::thread::spawn(move || autosave_loop(handle, data_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1577,6 +1705,9 @@ pub fn run() {
             get_thumb_strip,
             playback_frame,
             save_project,
+            check_recovery,
+            recover_project,
+            discard_recovery,
             open_project,
             relink_asset,
             new_project,

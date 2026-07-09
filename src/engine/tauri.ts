@@ -118,6 +118,15 @@ export class TauriEngine implements EngineClient {
   playbackSeek(tUs: TimeUs): Promise<void> {
     return invoke("playback_seek", { tUs });
   }
+  checkRecovery(): Promise<string | null> {
+    return invoke("check_recovery", { path: null });
+  }
+  recoverProject(autosave: string, original: string | null): Promise<StateSnapshot> {
+    return invoke("recover_project", { autosave, original });
+  }
+  discardRecovery(): Promise<void> {
+    return invoke("discard_recovery");
+  }
   getAudioPeaks(assetId: Id): Promise<number[] | null> {
     return invoke("get_audio_peaks", { assetId });
   }

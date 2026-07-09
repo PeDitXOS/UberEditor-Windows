@@ -166,6 +166,22 @@ export const useStore = create<UiState>((set, get) => {
 
     init: async () => {
       applySnapshot(await engine.getState());
+      // ¿quedó una copia de recuperación de una sesión anterior?
+      try {
+        const autosave = await engine.checkRecovery();
+        if (autosave) {
+          if (window.confirm("Hay una copia de recuperación más reciente que el proyecto. ¿Cargarla?")) {
+            applySnapshot(
+              await engine.recoverProject(autosave, null),
+              "Proyecto recuperado del autoguardado",
+            );
+          } else {
+            await engine.discardRecovery();
+          }
+        }
+      } catch {
+        /* sin recuperación */
+      }
       // refrescar cuando el backend termina jobs (conformado, etc.)
       void engine.onStateChanged(async () => {
         applySnapshot(await engine.getState());
