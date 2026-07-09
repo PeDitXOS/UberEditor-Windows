@@ -1,131 +1,197 @@
 import { create } from "zustand";
 
+import type { EngineClient } from "../engine/client";
 import { MockEngine, demoProject } from "../engine/mock";
-import type { Id, Project, TimeUs } from "../engine/types";
+import { TauriEngine, isTauri } from "../engine/tauri";
+import type {
+  AudioProps,
+  Id,
+  Project,
+  StateSnapshot,
+  TimeUs,
+  Transform2D,
+} from "../engine/types";
+import { activeSequence } from "../engine/types";
 
-const engine = new MockEngine(demoProject());
+const mockEngine = isTauri() ? null : new MockEngine(demoProject());
+export const engine: EngineClient = mockEngine ?? new TauriEngine();
 
 export interface UiState {
+  ready: boolean;
   project: Project;
-  /** bump para forzar re-render de canvases */
   version: number;
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
   selection: Id[];
   playheadUs: TimeUs;
   playing: boolean;
-  /** vista del timeline */
   viewStartUs: TimeUs;
   pxPerSec: number;
-  dirty: boolean;
   lastActionLabel?: string;
 
+  init: () => Promise<void>;
   seek: (us: TimeUs) => void;
   select: (ids: Id[], additive?: boolean) => void;
   togglePlay: () => void;
   setView: (viewStartUs: TimeUs, pxPerSec: number) => void;
-  splitAtPlayhead: () => void;
-  deleteSelection: (ripple: boolean) => void;
-  moveClip: (clipId: Id, toTrackId: Id, toStartUs: TimeUs) => void;
-  setClipProp: (clipId: Id, patch: Record<string, unknown>) => void;
-  toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => void;
-  undo: () => void;
-  redo: () => void;
+  splitAtPlayhead: () => Promise<void>;
+  deleteSelection: (ripple: boolean) => Promise<void>;
+  moveClip: (clipId: Id, toTrackId: Id, toStartUs: TimeUs) => Promise<void>;
+  trimClip: (clipId: Id, left: boolean, newEdgeUs: TimeUs) => Promise<void>;
+  setClipAudio: (clipId: Id, audio: AudioProps) => Promise<void>;
+  setClipTransform: (clipId: Id, transform: Transform2D) => Promise<void>;
+  importMedia: () => Promise<void>;
+  addClipFromAsset: (assetId: Id) => Promise<void>;
+  toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
 }
 
-function sync(set: (partial: Partial<UiState>) => void, label?: string) {
-  set({
-    project: engine.project,
-    version: Date.now() + Math.random(),
-    dirty: true,
-    lastActionLabel: label,
-  });
-}
+/** El proyecto vacío inicial se sustituye en init() con el estado del engine. */
+const emptyProject: Project = {
+  schema_version: 1,
+  id: "pending",
+  name: "Cargando…",
+  created_at: "",
+  settings: { whisper_language: "auto", autosave_secs: 60 },
+  assets: [],
+  transcripts: [],
+  sequences: [
+    {
+      id: "seq_pending",
+      name: "Principal",
+      resolution: [1920, 1080],
+      fps: [30, 1],
+      sample_rate: 48000,
+      tracks: [],
+      markers: [],
+    },
+  ],
+  active_sequence: "seq_pending",
+};
 
-export const useStore = create<UiState>((set, get) => ({
-  project: engine.project,
-  version: 0,
-  selection: [],
-  playheadUs: 12_400_000,
-  playing: false,
-  viewStartUs: 0,
-  pxPerSec: 26,
-  dirty: false,
-  lastActionLabel: undefined,
+export const useStore = create<UiState>((set, get) => {
+  const applySnapshot = (snap: StateSnapshot, label?: string) =>
+    set({
+      project: snap.project,
+      version: snap.version,
+      dirty: snap.dirty,
+      canUndo: snap.can_undo,
+      canRedo: snap.can_redo,
+      lastActionLabel: label,
+      ready: true,
+    });
 
-  seek: (us) => set({ playheadUs: Math.max(0, us) }),
-
-  select: (ids, additive = false) =>
-    set((s) => ({
-      selection: additive ? [...new Set([...s.selection, ...ids])] : ids,
-    })),
-
-  togglePlay: () => set((s) => ({ playing: !s.playing })),
-
-  setView: (viewStartUs, pxPerSec) =>
-    set({ viewStartUs: Math.max(0, viewStartUs), pxPerSec: Math.min(600, Math.max(2, pxPerSec)) }),
-
-  splitAtPlayhead: () => {
-    const { playheadUs, selection } = get();
-    const seq = engine.sequence;
-    // clips seleccionados bajo el playhead; si no hay selección, todos los que lo tocan
-    const candidates = seq.tracks
-      .flatMap((t) => t.clips)
-      .filter((c) => c.start < playheadUs && playheadUs < c.start + c.duration)
-      .filter((c) => selection.length === 0 || selection.includes(c.id));
-    if (!candidates.length) return;
-    let newSelection: Id[] = [];
-    for (const c of candidates) {
-      try {
-        const [l, r] = engine.splitClip(c.id, playheadUs);
-        newSelection = [...newSelection, l, r];
-      } catch {
-        /* clip no divisible en ese punto */
-      }
-    }
-    set({ selection: newSelection });
-    sync(set, "Dividir clip");
-  },
-
-  deleteSelection: (ripple) => {
-    const { selection } = get();
-    if (!selection.length) return;
-    engine.deleteClips(selection, ripple);
-    set({ selection: [] });
-    sync(set, ripple ? "Eliminar (ripple)" : "Eliminar");
-  },
-
-  moveClip: (clipId, toTrackId, toStartUs) => {
+  /** Ejecuta una op del engine; los errores van a la barra de estado. */
+  const run = async (label: string, op: () => Promise<StateSnapshot>) => {
     try {
-      engine.moveClip(clipId, toTrackId, toStartUs);
-      sync(set, "Mover clip");
-    } catch {
-      /* colisión o pista incompatible: no-op */
+      applySnapshot(await op(), label);
+    } catch (e) {
+      set({ lastActionLabel: `⚠ ${e instanceof Error ? e.message : String(e)}` });
     }
-  },
+  };
 
-  setClipProp: (clipId, patch) => {
-    engine.setClipProp(clipId, patch as never);
-    sync(set, "Editar propiedades");
-  },
+  return {
+    ready: false,
+    project: emptyProject,
+    version: -1,
+    dirty: false,
+    canUndo: false,
+    canRedo: false,
+    selection: [],
+    playheadUs: 12_400_000,
+    playing: false,
+    viewStartUs: 0,
+    pxPerSec: 26,
+    lastActionLabel: undefined,
 
-  toggleTrack: (trackId, prop) => {
-    engine.toggleTrack(trackId, prop);
-    sync(set, "Pista");
-  },
+    init: async () => {
+      applySnapshot(await engine.getState());
+    },
 
-  undo: () => {
-    const label = engine.undo();
-    if (label) sync(set, `Deshacer: ${label}`);
-  },
+    seek: (us) => set({ playheadUs: Math.max(0, us) }),
 
-  redo: () => {
-    const label = engine.redo();
-    if (label) sync(set, `Rehacer: ${label}`);
-  },
-}));
+    select: (ids, additive = false) =>
+      set((s) => ({ selection: additive ? [...new Set([...s.selection, ...ids])] : ids })),
 
-export function engineCanUndo(): boolean {
-  return engine.canUndo();
-}
-export function engineCanRedo(): boolean {
-  return engine.canRedo();
-}
+    togglePlay: () => set((s) => ({ playing: !s.playing })),
+
+    setView: (viewStartUs, pxPerSec) =>
+      set({
+        viewStartUs: Math.max(0, viewStartUs),
+        pxPerSec: Math.min(600, Math.max(2, pxPerSec)),
+      }),
+
+    splitAtPlayhead: async () => {
+      const { playheadUs, selection, project } = get();
+      const seq = activeSequence(project);
+      const candidates = seq.tracks
+        .flatMap((t) => t.clips)
+        .filter((c) => c.start < playheadUs && playheadUs < c.start + c.duration)
+        .filter((c) => selection.length === 0 || selection.includes(c.id));
+      if (!candidates.length) return;
+      const newSelection: Id[] = [];
+      for (const c of candidates) {
+        try {
+          const snap = await engine.splitClip(c.id, playheadUs);
+          applySnapshot(snap, "Dividir clip");
+        } catch {
+          /* clip no divisible en ese punto */
+        }
+      }
+      set({ selection: newSelection });
+    },
+
+    deleteSelection: async (ripple) => {
+      const { selection } = get();
+      if (!selection.length) return;
+      await run(ripple ? "Eliminar (ripple)" : "Eliminar", () =>
+        engine.deleteClips(selection, ripple),
+      );
+      set({ selection: [] });
+    },
+
+    moveClip: (clipId, toTrackId, toStartUs) =>
+      run("Mover clip", () => engine.moveClip(clipId, toTrackId, toStartUs, false)),
+
+    trimClip: (clipId, left, newEdgeUs) =>
+      run("Recortar clip", () => engine.trimClip(clipId, left, newEdgeUs)),
+
+    setClipAudio: (clipId, audio) =>
+      run("Editar audio", () => engine.setClipAudio(clipId, audio)),
+
+    setClipTransform: (clipId, transform) =>
+      run("Editar transformación", () => engine.setClipTransform(clipId, transform)),
+
+    importMedia: async () => {
+      const paths = await engine.pickMediaFiles();
+      if (!paths) {
+        set({ lastActionLabel: "⚠ Importar requiere la app de escritorio (npx tauri dev)" });
+        return;
+      }
+      await run(`Importar ${paths.length} archivo(s)`, () => engine.importMedia(paths));
+    },
+
+    addClipFromAsset: (assetId) =>
+      run("Añadir clip", () => engine.addClip(assetId, get().playheadUs)),
+
+    toggleTrack: async (trackId, prop) => {
+      // v0: solo el mock lo implementa; el backend real llegará con SetTrackProp
+      if (engine.kind === "mock") {
+        const snap = await (engine as MockEngine).toggleTrack(trackId, prop);
+        applySnapshot(snap, "Pista");
+      }
+    },
+
+    undo: async () => {
+      const snap = await engine.undo();
+      applySnapshot(snap, "Deshacer");
+    },
+
+    redo: async () => {
+      const snap = await engine.redo();
+      applySnapshot(snap, "Rehacer");
+    },
+  };
+});

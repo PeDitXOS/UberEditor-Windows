@@ -2,12 +2,12 @@
 //! El frontend consulta el estado tras cada mutación (v0); los eventos
 //! `state.patch` llegarán cuando el volumen de datos lo justifique.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::State;
-use ue_core::model::{Id, Project};
+use ue_core::model::{AudioProps, Clip, Id, MediaKind, Project, TrackKind, Transform2D};
 use ue_core::ops::InsertMode;
 use ue_core::{ProjectStore, TimeUs};
 
@@ -120,6 +120,126 @@ fn redo(state: State<AppState>) -> Res<StateSnapshot> {
 }
 
 #[tauri::command]
+fn set_clip_audio(state: State<AppState>, clip_id: String, audio: AudioProps) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&clip_id)?;
+    store
+        .dispatch(
+            "Editar audio",
+            vec![ue_core::Action::SetClipAudio { clip_id: id, audio }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+#[tauri::command]
+fn set_clip_transform(
+    state: State<AppState>,
+    clip_id: String,
+    transform: Transform2D,
+) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&clip_id)?;
+    store
+        .dispatch(
+            "Editar transformación",
+            vec![ue_core::Action::SetClipTransform { clip_id: id, transform }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+/// Importa archivos al pool (probe + hash). No entra al historial (PLAN §6.10).
+#[tauri::command]
+fn import_media(state: State<AppState>, paths: Vec<String>) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let mut errors: Vec<String> = vec![];
+    let mut imported = 0usize;
+    for p in &paths {
+        match ue_media::import_file(Path::new(p)) {
+            Ok(asset) => {
+                // re-import del mismo contenido → no duplicar
+                if !store.project.assets.iter().any(|a| a.content_hash == asset.content_hash) {
+                    store.project.assets.push(asset);
+                }
+                imported += 1;
+            }
+            Err(e) => errors.push(format!("{p}: {e}")),
+        }
+    }
+    if imported > 0 {
+        store.version += 1;
+        store.dirty = true;
+    }
+    if imported == 0 && !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    Ok(snapshot(&store))
+}
+
+/// Añade un clip del asset a la primera pista compatible: en `at_us` si cabe,
+/// si no al final de la pista.
+#[tauri::command]
+fn add_clip(state: State<AppState>, asset_id: String, at_us: TimeUs) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let asset_id = parse_id(&asset_id)?;
+    let asset = store
+        .project
+        .asset(asset_id)
+        .ok_or_else(|| format!("asset {asset_id} no existe"))?
+        .clone();
+    let duration = ue_media::default_clip_duration(&asset);
+    if duration <= 0 {
+        return Err("el archivo no tiene duración utilizable".into());
+    }
+    let want_kind = if asset.kind == MediaKind::Audio { TrackKind::Audio } else { TrackKind::Video };
+    let seq_id = store.project.active_sequence;
+    let seq = store.project.sequence(seq_id).ok_or("secuencia activa no existe")?;
+    let track = seq
+        .tracks
+        .iter()
+        .find(|t| t.kind == want_kind && !t.locked)
+        .ok_or("no hay pista compatible desbloqueada")?;
+    let track_id = track.id;
+    let at = at_us.max(0);
+    let fits = !track.collides(at, duration, None);
+    let start = if fits {
+        at
+    } else {
+        track.clips.iter().map(|c| c.end()).max().unwrap_or(0)
+    };
+    let clip = Clip::new_media(asset.id, 0, duration, start);
+    store
+        .insert_clip(track_id, clip, InsertMode::Strict)
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+/// Frame real JPEG del tiempo dado (bytes crudos; vacío = sin señal).
+#[tauri::command]
+fn render_frame(
+    state: State<AppState>,
+    t_us: TimeUs,
+    max_width: u32,
+) -> Res<tauri::ipc::Response> {
+    let (project, seq_id, base_dir) = {
+        let store = state.store.lock().unwrap();
+        let base = state
+            .path
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        (store.project.clone(), store.project.active_sequence, base)
+    }; // soltar el lock antes de invocar ffmpeg
+    let bytes = ue_media::frame::render_frame(&project, seq_id, t_us, max_width, &base_dir)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
 fn save_project(state: State<AppState>, path: Option<String>) -> Res<String> {
     let mut store = state.store.lock().unwrap();
     let mut stored_path = state.path.lock().unwrap();
@@ -176,6 +296,11 @@ pub fn run() {
             cut_ranges,
             undo,
             redo,
+            set_clip_audio,
+            set_clip_transform,
+            import_media,
+            add_clip,
+            render_frame,
             save_project,
             open_project,
             new_project,

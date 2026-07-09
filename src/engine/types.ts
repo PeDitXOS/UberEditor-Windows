@@ -1,38 +1,169 @@
 /**
- * Espejo TypeScript del modelo de ue-core (crates/ue-core/src/model.rs).
- * Cuando exista el backend Tauri, estos tipos se generarán automáticamente;
- * mientras tanto se mantienen a mano y el MockEngine los implementa.
+ * Espejo TypeScript del modelo real de ue-core (crates/ue-core/src/model.rs),
+ * con la misma forma JSON que produce serde (snake_case, payload etiquetado,
+ * tuplas como arrays). Generación automática (ts-rs) pendiente; mantener en
+ * sincronía a mano hasta entonces.
  */
 
 export type Id = string;
 export type TimeUs = number;
+
+// -- keyframes ---------------------------------------------------------------
+
+export type Interp =
+  | { kind: "hold" }
+  | { kind: "linear" }
+  | { kind: "smooth"; tan_out?: number; tan_in?: number };
+
+export interface Keyframe {
+  t: TimeUs;
+  value: number;
+  interp: Interp;
+}
+
+/** número plano ⇔ Const; objeto {keys} ⇔ Curve (serde untagged) */
+export type Param = number | { keys: Keyframe[] };
+
+export function paramValue(p: Param, tUs: TimeUs = 0): number {
+  if (typeof p === "number") return p;
+  const keys = p.keys;
+  if (!keys.length) return 0;
+  if (tUs <= keys[0].t) return keys[0].value;
+  const last = keys[keys.length - 1];
+  if (tUs >= last.t) return last.value;
+  for (let i = 0; i < keys.length - 1; i++) {
+    const a = keys[i];
+    const b = keys[i + 1];
+    if (a.t <= tUs && tUs < b.t) {
+      if (a.interp.kind === "hold") return a.value;
+      const u = (tUs - a.t) / (b.t - a.t);
+      return a.value + (b.value - a.value) * u; // lineal (smooth ≈ lineal en UI)
+    }
+  }
+  return last.value;
+}
+
+export function isCurve(p: Param): boolean {
+  return typeof p !== "number";
+}
+
+// -- media -------------------------------------------------------------------
 
 export type MediaKind = "video" | "audio" | "image";
 export type TrackKind = "video" | "audio";
 
 export interface ProbeInfo {
   duration_us: TimeUs;
-  fps?: [number, number];
+  fps: [number, number] | null;
   width: number;
   height: number;
+  rotation: number;
+  vcodec: string | null;
+  acodec: string | null;
   audio_channels: number;
-  vcodec?: string;
-  acodec?: string;
+  vfr: boolean;
 }
 
 export interface MediaAsset {
   id: Id;
   kind: MediaKind;
   path: string;
+  content_hash: string;
   probe: ProbeInfo;
-  /** progreso 0..1 de jobs de caché (mock); undefined = listo */
-  caching?: number;
+  proxy: string | null;
+  audio_conform: string | null;
+  peaks: string | null;
+  thumbnails: string | null;
+  transcript: Id | null;
+  offline: boolean;
 }
+
+export function assetName(asset: MediaAsset | undefined): string {
+  return asset?.path.split("/").pop() ?? "(archivo)";
+}
+
+// -- clips -------------------------------------------------------------------
+
+export type SubtitleMode = "phrase" | "word" | "karaoke";
+export type TextAlign = "left" | "center" | "right";
+
+export interface TextStyle {
+  font: string;
+  size: number;
+  color: string;
+  bg: string | null;
+  stroke_color: string | null;
+  stroke_width: number;
+  highlight_color: string | null;
+  y_offset: number;
+  align: TextAlign;
+}
+
+export const DEFAULT_TEXT_STYLE: TextStyle = {
+  font: "sans-serif",
+  size: 60,
+  color: "#ffffff",
+  bg: null,
+  stroke_color: null,
+  stroke_width: 0,
+  highlight_color: null,
+  y_offset: 0,
+  align: "center",
+};
 
 export type ClipPayload =
   | { type: "media"; asset_id: Id; src_in: TimeUs; src_out: TimeUs }
-  | { type: "text"; content: string }
-  | { type: "solid"; color: string };
+  | { type: "text"; content: string; style: TextStyle }
+  | { type: "subtitles"; transcript_id: Id; style: TextStyle; mode: SubtitleMode }
+  | { type: "solid"; color: [number, number, number, number] };
+
+export interface Transform2D {
+  position: [Param, Param];
+  scale: [Param, Param];
+  rotation: Param;
+  crop: [Param, Param, Param, Param];
+  opacity: Param;
+  flip_h: boolean;
+  flip_v: boolean;
+}
+
+export const DEFAULT_TRANSFORM: Transform2D = {
+  position: [0, 0],
+  scale: [1, 1],
+  rotation: 0,
+  crop: [0, 0, 0, 0],
+  opacity: 1,
+  flip_h: false,
+  flip_v: false,
+};
+
+export interface AudioProps {
+  gain_db: Param;
+  pan: Param;
+  fade_in_us: TimeUs;
+  fade_out_us: TimeUs;
+  muted: boolean;
+}
+
+export const DEFAULT_AUDIO: AudioProps = {
+  gain_db: 0,
+  pan: 0,
+  fade_in_us: 0,
+  fade_out_us: 0,
+  muted: false,
+};
+
+export interface EffectInstance {
+  effect_id: string;
+  enabled: boolean;
+  params: Record<string, Param>;
+}
+
+export interface TransitionRef {
+  effect_id: string;
+  duration: TimeUs;
+  params: Record<string, Param>;
+}
 
 export interface Clip {
   id: Id;
@@ -40,12 +171,14 @@ export interface Clip {
   start: TimeUs;
   duration: TimeUs;
   speed: number;
-  gain_db: number;
-  fade_in_us: number;
-  fade_out_us: number;
-  opacity: number;
-  label?: string;
+  effects: EffectInstance[];
+  transform: Transform2D;
+  audio: AudioProps;
+  transition_in: TransitionRef | null;
+  label_color: string | null;
 }
+
+// -- secuencia / proyecto ----------------------------------------------------
 
 export interface Track {
   id: Id;
@@ -62,7 +195,7 @@ export interface Marker {
   id: Id;
   t: TimeUs;
   name: string;
-  color?: string;
+  color: string | null;
 }
 
 export interface Sequence {
@@ -70,19 +203,57 @@ export interface Sequence {
   name: string;
   resolution: [number, number];
   fps: [number, number];
+  sample_rate: number;
   tracks: Track[];
   markers: Marker[];
 }
 
+export interface ProjectSettings {
+  whisper_language: string;
+  autosave_secs: number;
+}
+
 export interface Project {
+  schema_version: number;
+  id: Id;
   name: string;
+  created_at: string;
+  settings: ProjectSettings;
   assets: MediaAsset[];
+  transcripts: unknown[];
   sequences: Sequence[];
   active_sequence: Id;
 }
 
-export interface Job {
-  id: Id;
-  label: string;
-  progress: number; // 0..1
+export function activeSequence(project: Project): Sequence {
+  return (
+    project.sequences.find((s) => s.id === project.active_sequence) ??
+    project.sequences[0]
+  );
+}
+
+export function clipDisplayName(clip: Clip, project: Project): string {
+  switch (clip.payload.type) {
+    case "media":
+      return assetName(project.assets.find((a) => a.id === (clip.payload as { asset_id: Id }).asset_id));
+    case "text":
+      return clip.payload.content.length > 24
+        ? "Título"
+        : clip.payload.content || "Texto";
+    case "subtitles":
+      return "Subtítulos";
+    case "solid":
+      return "Color";
+  }
+}
+
+// -- snapshot del engine -----------------------------------------------------
+
+export interface StateSnapshot {
+  project: Project;
+  version: number;
+  dirty: boolean;
+  can_undo: boolean;
+  can_redo: boolean;
+  undo_labels: string[];
 }

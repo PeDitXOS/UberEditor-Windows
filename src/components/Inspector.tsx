@@ -1,4 +1,5 @@
 import type { Clip } from "../engine/types";
+import { activeSequence, assetName, isCurve, paramValue } from "../engine/types";
 import { usToDuration, usToTimecode } from "../lib/time";
 import { useStore } from "../state/store";
 
@@ -17,6 +18,7 @@ function Slider({
   max,
   step,
   unit,
+  disabled,
   onChange,
 }: {
   value: number;
@@ -24,17 +26,19 @@ function Slider({
   max: number;
   step: number;
   unit?: string;
+  disabled?: boolean;
   onChange: (v: number) => void;
 }) {
   return (
     <>
       <input
         type="range"
-        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
+        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent) disabled:opacity-40"
         min={min}
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="w-14 shrink-0 text-right font-[var(--font-mono)] text-[11px] text-ink">
@@ -56,19 +60,25 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function ClipInspector({ clip }: { clip: Clip }) {
   const project = useStore((s) => s.project);
-  const setClipProp = useStore((s) => s.setClipProp);
-  const fps = project.sequences[0].fps;
+  const setClipAudio = useStore((s) => s.setClipAudio);
+  const setClipTransform = useStore((s) => s.setClipTransform);
+  const fps = activeSequence(project).fps;
 
   const asset =
     clip.payload.type === "media"
       ? project.assets.find((a) => a.id === (clip.payload as { asset_id: string }).asset_id)
       : undefined;
 
+  const opacity = paramValue(clip.transform.opacity);
+  const scale = paramValue(clip.transform.scale[0]);
+  const rotation = paramValue(clip.transform.rotation);
+  const gain = paramValue(clip.audio.gain_db);
+
   return (
     <>
       <div className="border-b border-line-soft px-3 py-3">
         <div className="truncate text-[13px] font-medium text-ink">
-          {clip.label ?? (clip.payload.type === "text" ? "Texto" : "Clip")}
+          {asset ? assetName(asset) : clip.payload.type === "text" ? "Texto" : "Clip"}
         </div>
         <div className="mt-1 font-[var(--font-mono)] text-[10px] text-ink-faint">
           {usToTimecode(clip.start, fps)} → {usToTimecode(clip.start + clip.duration, fps)} ·{" "}
@@ -79,40 +89,57 @@ function ClipInspector({ clip }: { clip: Clip }) {
       <Section title="Transformación">
         <Row label="Opacidad">
           <Slider
-            value={clip.opacity}
+            value={opacity}
             min={0}
             max={1}
             step={0.01}
-            onChange={(v) => setClipProp(clip.id, { opacity: v })}
+            disabled={isCurve(clip.transform.opacity)}
+            onChange={(v) => void setClipTransform(clip.id, { ...clip.transform, opacity: v })}
           />
         </Row>
         <Row label="Escala">
-          <Slider value={1} min={0.1} max={4} step={0.01} onChange={() => {}} />
+          <Slider
+            value={scale}
+            min={0.1}
+            max={4}
+            step={0.01}
+            disabled={isCurve(clip.transform.scale[0])}
+            onChange={(v) => void setClipTransform(clip.id, { ...clip.transform, scale: [v, v] })}
+          />
         </Row>
         <Row label="Rotación">
-          <Slider value={0} min={-180} max={180} step={1} unit="°" onChange={() => {}} />
+          <Slider
+            value={rotation}
+            min={-180}
+            max={180}
+            step={1}
+            unit="°"
+            disabled={isCurve(clip.transform.rotation)}
+            onChange={(v) => void setClipTransform(clip.id, { ...clip.transform, rotation: v })}
+          />
         </Row>
       </Section>
 
       <Section title="Audio">
         <Row label="Ganancia">
           <Slider
-            value={clip.gain_db}
+            value={gain}
             min={-60}
             max={12}
             step={0.5}
             unit=" dB"
-            onChange={(v) => setClipProp(clip.id, { gain_db: v })}
+            disabled={isCurve(clip.audio.gain_db)}
+            onChange={(v) => void setClipAudio(clip.id, { ...clip.audio, gain_db: v })}
           />
         </Row>
         <Row label="Fade in">
           <span className="font-[var(--font-mono)] text-[11px] text-ink">
-            {(clip.fade_in_us / 1e6).toFixed(1)} s
+            {(clip.audio.fade_in_us / 1e6).toFixed(1)} s
           </span>
         </Row>
         <Row label="Fade out">
           <span className="font-[var(--font-mono)] text-[11px] text-ink">
-            {(clip.fade_out_us / 1e6).toFixed(1)} s
+            {(clip.audio.fade_out_us / 1e6).toFixed(1)} s
           </span>
         </Row>
       </Section>
@@ -120,7 +147,9 @@ function ClipInspector({ clip }: { clip: Clip }) {
       {clip.payload.type === "media" && asset && (
         <Section title="Fuente">
           <div className="space-y-1 text-[11px]">
-            <div className="truncate text-ink">{asset.path}</div>
+            <div className="truncate text-ink" title={asset.path}>
+              {asset.path}
+            </div>
             <div className="font-[var(--font-mono)] text-[10px] text-ink-faint">
               {usToDuration(clip.payload.src_in)} → {usToDuration(clip.payload.src_out)} del
               archivo · velocidad {clip.speed}×
@@ -138,9 +167,19 @@ function ClipInspector({ clip }: { clip: Clip }) {
       )}
 
       <Section title="Efectos">
-        <div className="rounded-md border border-dashed border-line px-2.5 py-3 text-center text-[11px] text-ink-faint">
-          Sin efectos. El sistema de packs llega en la Fase 2.
-        </div>
+        {clip.effects.length === 0 ? (
+          <div className="rounded-md border border-dashed border-line px-2.5 py-3 text-center text-[11px] text-ink-faint">
+            Sin efectos. El sistema de packs llega en la Fase 2.
+          </div>
+        ) : (
+          <ul className="space-y-1 text-[12px]">
+            {clip.effects.map((e, i) => (
+              <li key={i} className="rounded bg-bg2 px-2 py-1">
+                {e.effect_id}
+              </li>
+            ))}
+          </ul>
+        )}
       </Section>
     </>
   );
@@ -151,7 +190,7 @@ export function Inspector() {
   const project = useStore((s) => s.project);
   useStore((s) => s.version);
 
-  const seq = project.sequences[0];
+  const seq = activeSequence(project);
   const clip = seq.tracks.flatMap((t) => t.clips).find((c) => selection.includes(c.id));
 
   return (
@@ -169,7 +208,9 @@ export function Inspector() {
               <div>
                 {seq.resolution[0]}×{seq.resolution[1]} · {Math.round(seq.fps[0] / seq.fps[1])} fps
               </div>
-              <div>{seq.tracks.length} pistas · 48 kHz</div>
+              <div>
+                {seq.tracks.length} pistas · {(seq.sample_rate / 1000).toFixed(0)} kHz
+              </div>
             </div>
           </div>
           <p className="mt-3 text-[11px] leading-relaxed text-ink-faint">

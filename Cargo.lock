@@ -3716,6 +3716,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ue-media"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "ue-core",
+ "ulid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "ue-tauri"
 version = "0.1.0"
 dependencies = [
@@ -3725,6 +3737,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "ue-core",
+ "ue-media",
  "ulid",
 ]
 
@@ -4631,6 +4644,12 @@ dependencies = [
  "once_cell",
  "pkg-config",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d93c89cdc2d3a63c3ec48ffe926931bdc069eafa8e4402fe6d8f790c9d1e576"
 
 [[package]]
 name = "yoke"

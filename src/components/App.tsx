@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 
-import { useStore } from "../state/store";
+import { activeSequence } from "../engine/types";
 import { frameToUs } from "../lib/time";
+import { useStore } from "../state/store";
 import { Header } from "./Header";
 import { MediaPool } from "./MediaPool";
 import { Preview } from "./Preview";
@@ -14,31 +15,29 @@ function useKeyboard() {
     const onKey = (e: KeyboardEvent) => {
       const s = useStore.getState();
       const mod = e.metaKey || e.ctrlKey;
-      const inInput =
-        (e.target as HTMLElement)?.tagName === "INPUT" ||
-        (e.target as HTMLElement)?.tagName === "TEXTAREA";
-      if (inInput) return;
+      const el = e.target as HTMLElement;
+      if (el?.tagName === "INPUT" || el?.tagName === "TEXTAREA") return;
 
       if (e.code === "Space") {
         e.preventDefault();
         s.togglePlay();
       } else if (mod && e.key.toLowerCase() === "z" && e.shiftKey) {
         e.preventDefault();
-        s.redo();
+        void s.redo();
       } else if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        s.undo();
+        void s.undo();
       } else if (e.key.toLowerCase() === "k" && mod) {
         e.preventDefault();
-        s.splitAtPlayhead();
+        void s.splitAtPlayhead();
       } else if (e.key.toLowerCase() === "s" && !mod) {
-        s.splitAtPlayhead();
+        void s.splitAtPlayhead();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        s.deleteSelection(e.shiftKey);
+        void s.deleteSelection(e.shiftKey);
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
-        const fps = s.project.sequences[0].fps;
+        const fps = activeSequence(s.project).fps;
         const step = frameToUs(1, fps) * (e.shiftKey ? 10 : 1);
         s.seek(s.playheadUs + (e.key === "ArrowLeft" ? -step : step));
       } else if (e.key === "Home") {
@@ -69,6 +68,10 @@ function usePlayback() {
 }
 
 export function App() {
+  const init = useStore((s) => s.init);
+  useEffect(() => {
+    void init();
+  }, [init]);
   useKeyboard();
   usePlayback();
 

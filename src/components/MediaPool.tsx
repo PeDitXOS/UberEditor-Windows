@@ -1,4 +1,5 @@
 import type { MediaAsset } from "../engine/types";
+import { assetName } from "../engine/types";
 import { usToDuration } from "../lib/time";
 import { useStore } from "../state/store";
 
@@ -35,47 +36,52 @@ function AssetThumb({ asset }: { asset: MediaAsset }) {
 
 export function MediaPool() {
   const assets = useStore((s) => s.project.assets);
+  const importMedia = useStore((s) => s.importMedia);
+  const addClipFromAsset = useStore((s) => s.addClipFromAsset);
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between px-3 pb-2 pt-3">
         <h2 className="panel-eyebrow">Medios</h2>
-        <button className="focus-ring rounded-md border border-line px-2 py-1 text-[11px] text-ink-dim hover:bg-bg3 hover:text-ink">
+        <button
+          className="focus-ring rounded-md border border-line px-2 py-1 text-[11px] text-ink-dim hover:bg-bg3 hover:text-ink"
+          onClick={() => void importMedia()}
+          title="Importar archivos de video, audio o imagen"
+        >
           + Importar
         </button>
       </div>
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
+        {assets.length === 0 && (
+          <div className="mx-1 mt-2 rounded-lg border border-dashed border-line px-3 py-6 text-center text-[11px] leading-relaxed text-ink-faint">
+            Sin medios todavía.
+            <br />
+            Usa «+ Importar» para añadir video, audio o imágenes.
+          </div>
+        )}
         {assets.map((a) => (
           <div
             key={a.id}
             className="group flex cursor-grab items-center gap-2.5 rounded-lg p-1.5 hover:bg-bg2"
-            title={a.path}
+            title={`${a.path}\nDoble click: añadir al timeline en el playhead`}
+            onDoubleClick={() => void addClipFromAsset(a.id)}
           >
             <AssetThumb asset={a} />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[12px] leading-tight text-ink">
-                {a.path.split("/").pop()}
-              </div>
+              <div className="truncate text-[12px] leading-tight text-ink">{assetName(a)}</div>
               <div className="mt-0.5 font-[var(--font-mono)] text-[10px] text-ink-faint">
                 {KIND_LABEL[a.kind]}
                 {a.probe.width > 0 && ` · ${a.probe.width}×${a.probe.height}`}
                 {a.probe.fps && ` · ${Math.round(a.probe.fps[0] / a.probe.fps[1])}fps`}
                 {a.kind === "audio" && ` · ${usToDuration(a.probe.duration_us)}`}
+                {a.probe.vfr && " · VFR"}
               </div>
-              {a.caching !== undefined && (
-                <div className="mt-1.5 h-[3px] w-full overflow-hidden rounded-full bg-bg3">
-                  <div
-                    className="h-full rounded-full bg-accent/70"
-                    style={{ width: `${a.caching * 100}%` }}
-                  />
-                </div>
-              )}
             </div>
           </div>
         ))}
       </div>
       <div className="border-t border-line-soft px-3 py-2 text-[11px] text-ink-faint">
-        Arrastra archivos aquí para importarlos
+        Doble click en un medio lo añade al timeline
       </div>
     </div>
   );

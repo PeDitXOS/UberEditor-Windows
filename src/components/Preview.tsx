@@ -1,89 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { Clip, Project } from "../engine/types";
+import { activeSequence, assetName } from "../engine/types";
 import { frameToUs, hash32, usToTimecode } from "../lib/time";
-import { useStore } from "../state/store";
+import { engine, useStore } from "../state/store";
 
 /**
- * Monitor de programa (mock): dibuja una representación del frame actual a
- * partir del estado real del timeline — el clip de video superior activo y los
- * textos activos — para que preview y timeline cuenten la misma historia.
- * El motor wgpu real sustituirá el contenido del canvas, no el componente.
+ * Monitor de programa. Dos modos:
+ * - Escritorio (Tauri): frame REAL extraído por ffmpeg (ue-media) + overlays.
+ * - Navegador (mock): representación esquemática del clip activo.
+ * En ambos, los textos activos y las guías se dibujan encima; el motor wgpu
+ * de la Fase 2 sustituirá la fuente del frame, no este componente.
  */
-function drawFrame(
+
+function activeClips(project: Project, playheadUs: number) {
+  const seq = activeSequence(project);
+  const topFirst = [...seq.tracks].reverse();
+  const videoClips = topFirst
+    .filter((t) => t.kind === "video" && !t.muted)
+    .flatMap((t) => t.clips)
+    .filter((c) => c.start <= playheadUs && playheadUs < c.start + c.duration);
+  return {
+    video: videoClips.find((c) => c.payload.type === "media"),
+    texts: videoClips.filter((c) => c.payload.type === "text"),
+  };
+}
+
+function drawOverlays(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
-  project: Project,
-  playheadUs: number,
+  texts: Clip[],
 ) {
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, w, h);
-
-  const seq = project.sequences[0];
-  const topFirst = [...seq.tracks].reverse();
-
-  const activeVideo: Clip | undefined = topFirst
-    .filter((t) => t.kind === "video" && !t.muted)
-    .flatMap((t) => t.clips)
-    .find(
-      (c) =>
-        c.payload.type === "media" &&
-        c.start <= playheadUs &&
-        playheadUs < c.start + c.duration,
-    );
-
-  const activeTexts: Clip[] = topFirst
-    .filter((t) => t.kind === "video" && !t.muted)
-    .flatMap((t) => t.clips)
-    .filter(
-      (c) =>
-        c.payload.type === "text" &&
-        c.start <= playheadUs &&
-        playheadUs < c.start + c.duration,
-    );
-
-  if (activeVideo && activeVideo.payload.type === "media") {
-    const asset = project.assets.find(
-      (a) => a.id === (activeVideo.payload as { asset_id: string }).asset_id,
-    );
-    const seed = hash32(asset?.path ?? "x");
-    const hue = 175 + (seed % 60) - 30; // azules/verdosos apagados de "material"
-    const g = ctx.createLinearGradient(0, 0, w, h);
-    g.addColorStop(0, `hsl(${hue} 22% 22%)`);
-    g.addColorStop(1, `hsl(${hue + 25} 26% 12%)`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, w, h);
-
-    // sugerencia de contenido: círculo de "sujeto" + horizonte
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    ctx.beginPath();
-    ctx.arc(w * 0.5, h * 0.44, h * 0.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillRect(0, h * 0.72, w, 1.5);
-
-    ctx.fillStyle = "rgba(233,228,219,0.6)";
-    ctx.font = `500 ${Math.round(h * 0.045)}px "JetBrains Mono", monospace`;
-    ctx.textAlign = "left";
-    ctx.fillText(asset?.path.split("/").pop() ?? "", h * 0.05, h * 0.09);
-
-    ctx.fillStyle = "rgba(0,0,0,0.45)";
-    const badge = "PREVIEW ½";
-    ctx.font = `500 ${Math.round(h * 0.035)}px "JetBrains Mono", monospace`;
-    const bw = ctx.measureText(badge).width + h * 0.03;
-    ctx.fillRect(w - bw - h * 0.04, h * 0.045, bw, h * 0.06);
-    ctx.fillStyle = "rgba(233,228,219,0.75)";
-    ctx.fillText(badge, w - bw - h * 0.04 + h * 0.015, h * 0.09);
-  } else {
-    ctx.fillStyle = "#0a0908";
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = "rgba(164,155,143,0.35)";
-    ctx.font = `500 ${Math.round(h * 0.05)}px "Space Grotesk", sans-serif`;
-    ctx.textAlign = "center";
-    ctx.fillText("Sin señal en este punto", w / 2, h / 2);
-  }
-
   // regla de tercios, sutil
   ctx.strokeStyle = "rgba(255,255,255,0.05)";
   ctx.lineWidth = 1;
@@ -98,9 +46,8 @@ function drawFrame(
     ctx.stroke();
   }
 
-  // textos activos (títulos/CTA)
   ctx.textAlign = "center";
-  for (const t of activeTexts) {
+  for (const t of texts) {
     if (t.payload.type !== "text") continue;
     const content = t.payload.content;
     const isCta = content.length < 16;
@@ -117,6 +64,53 @@ function drawFrame(
       ctx.shadowBlur = 0;
     }
   }
+}
+
+function drawMockVideo(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  project: Project,
+  video: Clip | undefined,
+) {
+  if (video && video.payload.type === "media") {
+    const asset = project.assets.find(
+      (a) => a.id === (video.payload as { asset_id: string }).asset_id,
+    );
+    const seed = hash32(asset?.path ?? "x");
+    const hue = 175 + (seed % 60) - 30;
+    const g = ctx.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, `hsl(${hue} 22% 22%)`);
+    g.addColorStop(1, `hsl(${hue + 25} 26% 12%)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(255,255,255,0.05)";
+    ctx.beginPath();
+    ctx.arc(w * 0.5, h * 0.44, h * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(0, h * 0.72, w, 1.5);
+    ctx.fillStyle = "rgba(233,228,219,0.6)";
+    ctx.font = `500 ${Math.round(h * 0.045)}px "JetBrains Mono", monospace`;
+    ctx.textAlign = "left";
+    ctx.fillText(assetName(asset), h * 0.05, h * 0.09);
+  } else {
+    ctx.fillStyle = "#0a0908";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(164,155,143,0.35)";
+    ctx.font = `500 ${Math.round(h * 0.05)}px "Space Grotesk", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText("Sin señal en este punto", w / 2, h / 2);
+  }
+}
+
+function badge(ctx: CanvasRenderingContext2D, w: number, h: number, text: string) {
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.font = `500 ${Math.round(h * 0.035)}px "JetBrains Mono", monospace`;
+  ctx.textAlign = "left";
+  const bw = ctx.measureText(text).width + h * 0.03;
+  ctx.fillRect(w - bw - h * 0.04, h * 0.045, bw, h * 0.06);
+  ctx.fillStyle = "rgba(233,228,219,0.75)";
+  ctx.fillText(text, w - bw - h * 0.04 + h * 0.015, h * 0.09);
 }
 
 function TransportButton({
@@ -147,6 +141,10 @@ function TransportButton({
 
 export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [parentSize, setParentSize] = useState({ w: 0, h: 0 });
+  const [realFrame, setRealFrame] = useState<ImageBitmap | null>(null);
+  const frameReqRef = useRef(0);
+
   const project = useStore((s) => s.project);
   const playheadUs = useStore((s) => s.playheadUs);
   const playing = useStore((s) => s.playing);
@@ -154,9 +152,7 @@ export function Preview() {
   const seek = useStore((s) => s.seek);
   const version = useStore((s) => s.version);
 
-  const fps = project.sequences[0].fps;
-
-  const [parentSize, setParentSize] = useState({ w: 0, h: 0 });
+  const fps = activeSequence(project).fps;
 
   useEffect(() => {
     const parent = canvasRef.current?.parentElement;
@@ -169,10 +165,34 @@ export function Preview() {
     return () => obs.disconnect();
   }, []);
 
+  // Frame real (solo escritorio): pedir al pausar/seek con debounce corto.
+  useEffect(() => {
+    if (engine.kind !== "tauri") return;
+    if (playing) return; // v0: sin frames en reproducción continua
+    const req = ++frameReqRef.current;
+    const handle = window.setTimeout(async () => {
+      try {
+        const bytes = await engine.renderFrame(playheadUs, 1280);
+        if (frameReqRef.current !== req) return; // llegó tarde
+        if (!bytes) {
+          setRealFrame(null);
+          return;
+        }
+        const bmp = await createImageBitmap(
+          new Blob([bytes.slice().buffer as ArrayBuffer], { type: "image/jpeg" }),
+        );
+        if (frameReqRef.current === req) setRealFrame(bmp);
+      } catch {
+        if (frameReqRef.current === req) setRealFrame(null);
+      }
+    }, 90);
+    return () => window.clearTimeout(handle);
+  }, [playheadUs, version, playing]);
+
+  // Dibujo
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || parentSize.w === 0) return;
-    // encajar 16:9 en el hueco disponible
     const maxW = parentSize.w - 24;
     const maxH = parentSize.h - 24;
     let w = maxW;
@@ -189,8 +209,36 @@ export function Preview() {
     canvas.style.height = `${h}px`;
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawFrame(ctx, w, h, project, playheadUs);
-  }, [project, playheadUs, version, parentSize]);
+
+    const { video, texts } = activeClips(project, playheadUs);
+
+    if (engine.kind === "tauri" && realFrame) {
+      // frame real letterboxeado
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, w, h);
+      const scale = Math.min(w / realFrame.width, h / realFrame.height);
+      const dw = realFrame.width * scale;
+      const dh = realFrame.height * scale;
+      ctx.drawImage(realFrame, (w - dw) / 2, (h - dh) / 2, dw, dh);
+      badge(ctx, w, h, "FRAME REAL");
+    } else if (engine.kind === "tauri" && !video) {
+      ctx.fillStyle = "#0a0908";
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = "rgba(164,155,143,0.35)";
+      ctx.font = `500 ${Math.round(h * 0.05)}px "Space Grotesk", sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText("Sin señal en este punto", w / 2, h / 2);
+    } else if (engine.kind === "tauri") {
+      // hay clip pero el frame aún no llegó
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, w, h);
+      badge(ctx, w, h, "CARGANDO…");
+    } else {
+      drawMockVideo(ctx, w, h, project, video);
+      badge(ctx, w, h, "PREVIEW ½");
+    }
+    drawOverlays(ctx, w, h, texts);
+  }, [project, playheadUs, version, parentSize, realFrame]);
 
   const frameStep = (n: number) => seek(playheadUs + frameToUs(n, fps));
 
@@ -225,7 +273,7 @@ export function Preview() {
             label="⏭"
             title="Ir al final"
             onClick={() => {
-              const seq = project.sequences[0];
+              const seq = activeSequence(project);
               const end = Math.max(
                 ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)),
                 0,
@@ -238,7 +286,9 @@ export function Preview() {
         <div className="flex-1" />
 
         <div className="flex items-center gap-2 text-[11px] text-ink-faint">
-          <span className="rounded-md border border-line px-2 py-1">Calidad: Auto</span>
+          <span className="rounded-md border border-line px-2 py-1">
+            {engine.kind === "tauri" ? "Motor: escritorio" : "Motor: navegador"}
+          </span>
           <span className="font-[var(--font-mono)]">0 drops</span>
         </div>
       </div>

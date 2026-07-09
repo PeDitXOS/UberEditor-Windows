@@ -1,0 +1,13 @@
+[package]
+name = "ue-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+ue-core = { path = "../ue-core" }

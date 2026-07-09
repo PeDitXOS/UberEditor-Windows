@@ -1,13 +1,25 @@
 /**
- * MockEngine: implementación en memoria de las operaciones del editor para
- * desarrollo en navegador y screenshots. Reproduce la semántica de ue-core
- * (split cuantizado a frame, ripple delete, historial transaccional) de forma
- * simplificada. El backend real (Tauri → ue-core) implementará esta misma
- * interfaz.
+ * MockEngine: implementación en memoria del contrato EngineClient para
+ * desarrollo en navegador y pruebas visuales. Replica la semántica de ue-core
+ * (split cuantizado a frame, ripple, historial por snapshots) de forma
+ * simplificada; el escritorio usa el backend real.
  */
 
-import type { Clip, Id, Project, Sequence, TimeUs, Track } from "./types";
 import { quantizeToFrame } from "../lib/time";
+import type { EngineClient } from "./client";
+import type {
+  AudioProps,
+  Clip,
+  Id,
+  MediaAsset,
+  Project,
+  Sequence,
+  StateSnapshot,
+  TimeUs,
+  Track,
+  Transform2D,
+} from "./types";
+import { DEFAULT_AUDIO, DEFAULT_TEXT_STYLE, DEFAULT_TRANSFORM, activeSequence } from "./types";
 
 let idCounter = 0;
 export function newId(prefix = "id"): Id {
@@ -17,8 +29,11 @@ export function newId(prefix = "id"): Id {
 
 const S = 1_000_000;
 
-export class MockEngine {
-  project: Project;
+export class MockEngine implements EngineClient {
+  readonly kind = "mock" as const;
+  private project: Project;
+  private version = 0;
+  private dirty = false;
   private undoStack: { label: string; snapshot: Project }[] = [];
   private redoStack: { label: string; snapshot: Project }[] = [];
 
@@ -26,19 +41,22 @@ export class MockEngine {
     this.project = project;
   }
 
-  get sequence(): Sequence {
-    const seq = this.project.sequences.find(
-      (s) => s.id === this.project.active_sequence,
-    );
-    if (!seq) throw new Error("secuencia activa no existe");
-    return seq;
+  private get sequence(): Sequence {
+    return activeSequence(this.project);
   }
 
-  private track(id: Id): Track | undefined {
-    return this.sequence.tracks.find((t) => t.id === id);
+  private snapshot(): StateSnapshot {
+    return {
+      project: structuredClone(this.project),
+      version: this.version,
+      dirty: this.dirty,
+      can_undo: this.undoStack.length > 0,
+      can_redo: this.redoStack.length > 0,
+      undo_labels: this.undoStack.map((e) => e.label),
+    };
   }
 
-  locateClip(id: Id): { track: Track; clip: Clip; index: number } | undefined {
+  private locate(id: Id): { track: Track; clip: Clip; index: number } | undefined {
     for (const track of this.sequence.tracks) {
       const index = track.clips.findIndex((c) => c.id === id);
       if (index >= 0) return { track, clip: track.clips[index], index };
@@ -46,53 +64,34 @@ export class MockEngine {
     return undefined;
   }
 
-  private transaction<T>(label: string, fn: () => T): T {
-    const snapshot = structuredClone(this.project);
+  private transaction(label: string, fn: () => void): StateSnapshot {
+    const before = structuredClone(this.project);
     try {
-      const result = fn();
-      this.undoStack.push({ label, snapshot });
+      fn();
+      this.undoStack.push({ label, snapshot: before });
       this.redoStack = [];
-      return result;
+      this.version += 1;
+      this.dirty = true;
     } catch (e) {
-      this.project = snapshot;
+      this.project = before;
       throw e;
     }
+    return this.snapshot();
   }
 
-  canUndo() {
-    return this.undoStack.length > 0;
-  }
-  canRedo() {
-    return this.redoStack.length > 0;
-  }
-  undoLabel(): string | undefined {
-    return this.undoStack[this.undoStack.length - 1]?.label;
+  // ---- contrato ----
+
+  async getState(): Promise<StateSnapshot> {
+    return this.snapshot();
   }
 
-  undo(): string | undefined {
-    const entry = this.undoStack.pop();
-    if (!entry) return undefined;
-    this.redoStack.push({ label: entry.label, snapshot: structuredClone(this.project) });
-    this.project = entry.snapshot;
-    return entry.label;
-  }
-
-  redo(): string | undefined {
-    const entry = this.redoStack.pop();
-    if (!entry) return undefined;
-    this.undoStack.push({ label: entry.label, snapshot: structuredClone(this.project) });
-    this.project = entry.snapshot;
-    return entry.label;
-  }
-
-  /** Divide un clip en t (timeline, µs). Devuelve [izq, der]. */
-  splitClip(clipId: Id, t: TimeUs): [Id, Id] {
+  async splitClip(clipId: Id, tUs: TimeUs): Promise<StateSnapshot> {
     return this.transaction("Dividir clip", () => {
-      const found = this.locateClip(clipId);
+      const found = this.locate(clipId);
       if (!found) throw new Error("clip no encontrado");
       const { track, clip, index } = found;
       if (track.locked) throw new Error("pista bloqueada");
-      const tq = quantizeToFrame(t, this.sequence.fps);
+      const tq = quantizeToFrame(tUs, this.sequence.fps);
       if (tq <= clip.start || tq >= clip.start + clip.duration)
         throw new Error("punto de corte fuera del clip");
       const offset = tq - clip.start;
@@ -102,25 +101,25 @@ export class MockEngine {
       left.id = newId("clip");
       right.id = newId("clip");
       left.duration = offset;
-      left.fade_out_us = 0;
+      left.audio.fade_out_us = 0;
       right.start = tq;
       right.duration = clip.duration - offset;
-      right.fade_in_us = 0;
+      right.audio.fade_in_us = 0;
+      right.transition_in = null;
       if (left.payload.type === "media" && right.payload.type === "media") {
         const srcOff = Math.round(offset * clip.speed);
         right.payload.src_in = left.payload.src_in + srcOff;
         left.payload.src_out = left.payload.src_in + srcOff;
       }
       track.clips.splice(index, 1, left, right);
-      return [left.id, right.id];
     });
   }
 
-  deleteClips(ids: Id[], ripple: boolean): void {
-    this.transaction(ripple ? "Eliminar (ripple)" : "Eliminar", () => {
+  async deleteClips(ids: Id[], ripple: boolean): Promise<StateSnapshot> {
+    return this.transaction(ripple ? "Eliminar (ripple)" : "Eliminar", () => {
       const removed: { trackId: Id; start: TimeUs; end: TimeUs }[] = [];
       for (const id of ids) {
-        const found = this.locateClip(id);
+        const found = this.locate(id);
         if (!found) continue;
         if (found.track.locked) throw new Error("pista bloqueada");
         removed.push({
@@ -131,7 +130,6 @@ export class MockEngine {
         found.track.clips.splice(found.index, 1);
       }
       if (ripple) {
-        // v1 mock: ripple por pista de los rangos eliminados en esa pista
         for (const track of this.sequence.tracks) {
           const spans = removed.filter((r) => r.trackId === track.id);
           if (!spans.length) continue;
@@ -146,18 +144,22 @@ export class MockEngine {
     });
   }
 
-  moveClip(clipId: Id, toTrackId: Id, toStart: TimeUs): void {
-    this.transaction("Mover clip", () => {
-      const found = this.locateClip(clipId);
-      const target = this.track(toTrackId);
+  async moveClip(
+    clipId: Id,
+    toTrack: Id,
+    toStartUs: TimeUs,
+    _overwrite: boolean,
+  ): Promise<StateSnapshot> {
+    return this.transaction("Mover clip", () => {
+      const found = this.locate(clipId);
+      const target = this.sequence.tracks.find((t) => t.id === toTrack);
       if (!found || !target) throw new Error("clip o pista no encontrados");
       if (found.track.locked || target.locked) throw new Error("pista bloqueada");
       if (target.kind !== found.track.kind) throw new Error("tipo de pista incompatible");
-      const startQ = Math.max(0, quantizeToFrame(toStart, this.sequence.fps));
+      const startQ = Math.max(0, quantizeToFrame(toStartUs, this.sequence.fps));
       const dur = found.clip.duration;
       const collides = target.clips.some(
-        (c) =>
-          c.id !== clipId && c.start < startQ + dur && startQ < c.start + c.duration,
+        (c) => c.id !== clipId && c.start < startQ + dur && startQ < c.start + c.duration,
       );
       if (collides) throw new Error("colisión");
       found.track.clips.splice(found.index, 1);
@@ -167,209 +169,250 @@ export class MockEngine {
     });
   }
 
-  setClipProp(clipId: Id, patch: Partial<Clip>): void {
-    this.transaction("Editar propiedades", () => {
-      const found = this.locateClip(clipId);
+  async trimClip(clipId: Id, left: boolean, newEdgeUs: TimeUs): Promise<StateSnapshot> {
+    return this.transaction("Recortar clip", () => {
+      const found = this.locate(clipId);
       if (!found) throw new Error("clip no encontrado");
-      Object.assign(found.clip, patch);
+      const { clip } = found;
+      const edge = quantizeToFrame(newEdgeUs, this.sequence.fps);
+      if (left) {
+        const delta = Math.min(Math.max(edge, 0), clip.start + clip.duration - 33_333) - clip.start;
+        clip.start += delta;
+        clip.duration -= delta;
+        if (clip.payload.type === "media")
+          clip.payload.src_in += Math.round(delta * clip.speed);
+      } else {
+        clip.duration = Math.max(33_333, edge - clip.start);
+        if (clip.payload.type === "media")
+          clip.payload.src_out = clip.payload.src_in + Math.round(clip.duration * clip.speed);
+      }
     });
   }
 
-  toggleTrack(trackId: Id, prop: "muted" | "solo" | "locked"): void {
-    this.transaction("Pista", () => {
-      const track = this.track(trackId);
+  async undo(): Promise<StateSnapshot> {
+    const entry = this.undoStack.pop();
+    if (entry) {
+      this.redoStack.push({ label: entry.label, snapshot: structuredClone(this.project) });
+      this.project = entry.snapshot;
+      this.version += 1;
+    }
+    return this.snapshot();
+  }
+
+  async redo(): Promise<StateSnapshot> {
+    const entry = this.redoStack.pop();
+    if (entry) {
+      this.undoStack.push({ label: entry.label, snapshot: structuredClone(this.project) });
+      this.project = entry.snapshot;
+      this.version += 1;
+    }
+    return this.snapshot();
+  }
+
+  async setClipAudio(clipId: Id, audio: AudioProps): Promise<StateSnapshot> {
+    return this.transaction("Editar audio", () => {
+      const found = this.locate(clipId);
+      if (!found) throw new Error("clip no encontrado");
+      found.clip.audio = audio;
+    });
+  }
+
+  async setClipTransform(clipId: Id, transform: Transform2D): Promise<StateSnapshot> {
+    return this.transaction("Editar transformación", () => {
+      const found = this.locate(clipId);
+      if (!found) throw new Error("clip no encontrado");
+      found.clip.transform = transform;
+    });
+  }
+
+  async pickMediaFiles(): Promise<string[] | null> {
+    return null; // solo disponible en la app de escritorio
+  }
+
+  async importMedia(_paths: string[]): Promise<StateSnapshot> {
+    return this.snapshot();
+  }
+
+  async addClip(assetId: Id, atUs: TimeUs): Promise<StateSnapshot> {
+    return this.transaction("Añadir clip", () => {
+      const asset = this.project.assets.find((a) => a.id === assetId);
+      if (!asset) throw new Error("asset no encontrado");
+      const kind = asset.kind === "audio" ? "audio" : "video";
+      const track = this.sequence.tracks.find((t) => t.kind === kind && !t.locked);
+      if (!track) throw new Error("no hay pista compatible");
+      const duration = asset.kind === "image" ? 5 * S : asset.probe.duration_us;
+      let start = Math.max(0, quantizeToFrame(atUs, this.sequence.fps));
+      const collides = (s: number) =>
+        track.clips.some((c) => c.start < s + duration && s < c.start + c.duration);
+      if (collides(start)) {
+        start = Math.max(...track.clips.map((c) => c.start + c.duration), 0);
+      }
+      track.clips.push(mediaClip(asset, 0, duration / S, start / S));
+      track.clips.sort((a, b) => a.start - b.start);
+    });
+  }
+
+  async renderFrame(): Promise<Uint8Array | null> {
+    return null; // el mock dibuja su propio preview
+  }
+
+  /** Ayuda para tests/pruebas: alterna props de pista. */
+  async toggleTrack(trackId: Id, prop: "muted" | "solo" | "locked"): Promise<StateSnapshot> {
+    return this.transaction("Pista", () => {
+      const track = this.sequence.tracks.find((t) => t.id === trackId);
       if (!track) throw new Error("pista no encontrada");
       track[prop] = !track[prop];
     });
   }
 }
 
-/** Proyecto demo: devlog con voz, música, B-roll, texto y clips ya editados. */
-export function demoProject(): Project {
-  const assets = [
-    {
-      id: newId("asset"),
-      kind: "video" as const,
-      path: "media/intro_camara.mp4",
-      probe: {
-        duration_us: 28 * S,
-        fps: [30, 1] as [number, number],
-        width: 1920,
-        height: 1080,
-        audio_channels: 2,
-        vcodec: "h264",
-        acodec: "aac",
-      },
-    },
-    {
-      id: newId("asset"),
-      kind: "video" as const,
-      path: "media/gameplay_fisicas.mp4",
-      probe: {
-        duration_us: 84 * S,
-        fps: [60, 1] as [number, number],
-        width: 2560,
-        height: 1440,
-        audio_channels: 2,
-        vcodec: "hevc",
-        acodec: "aac",
-      },
-      caching: 0.64,
-    },
-    {
-      id: newId("asset"),
-      kind: "video" as const,
-      path: "media/pantalla_codigo.mp4",
-      probe: {
-        duration_us: 152 * S,
-        fps: [30, 1] as [number, number],
-        width: 1920,
-        height: 1080,
-        audio_channels: 0,
-        vcodec: "h264",
-      },
-    },
-    {
-      id: newId("asset"),
-      kind: "audio" as const,
-      path: "media/voz_off.wav",
-      probe: { duration_us: 58 * S, width: 0, height: 0, audio_channels: 1, acodec: "pcm_s16le" },
-    },
-    {
-      id: newId("asset"),
-      kind: "audio" as const,
-      path: "media/musica_lofi.mp3",
-      probe: { duration_us: 130 * S, width: 0, height: 0, audio_channels: 2, acodec: "mp3" },
-    },
-    {
-      id: newId("asset"),
-      kind: "image" as const,
-      path: "media/logo_canal.png",
-      probe: { duration_us: 0, width: 1024, height: 1024, audio_channels: 0 },
-    },
-  ];
-  const [cam, gameplay, screen, voz, musica] = assets;
+// ---------------------------------------------------------------------------
+// Proyecto demo (misma forma que ue-core)
+// ---------------------------------------------------------------------------
 
-  const mediaClip = (
-    asset: { id: Id },
-    srcIn: number,
-    srcOut: number,
-    start: number,
-    label?: string,
-    extra?: Partial<Clip>,
-  ): Clip => ({
+function makeAsset(
+  kind: MediaAsset["kind"],
+  path: string,
+  durationS: number,
+  extra?: Partial<MediaAsset["probe"]>,
+): MediaAsset {
+  return {
+    id: newId("asset"),
+    kind,
+    path,
+    content_hash: `xxh3:${path.length.toString(16).padStart(16, "0")}`,
+    probe: {
+      duration_us: durationS * S,
+      fps: kind === "video" ? [30, 1] : null,
+      width: kind === "video" ? 1920 : kind === "image" ? 1024 : 0,
+      height: kind === "video" ? 1080 : kind === "image" ? 1024 : 0,
+      rotation: 0,
+      vcodec: kind === "video" ? "h264" : null,
+      acodec: kind === "audio" ? "aac" : kind === "video" ? "aac" : null,
+      audio_channels: kind === "audio" ? 2 : kind === "video" ? 2 : 0,
+      vfr: false,
+      ...extra,
+    },
+    proxy: null,
+    audio_conform: null,
+    peaks: null,
+    thumbnails: null,
+    transcript: null,
+    offline: false,
+  };
+}
+
+function mediaClip(
+  asset: MediaAsset,
+  srcInS: number,
+  srcOutS: number,
+  startS: number,
+  extra?: Omit<Partial<Clip>, "audio"> & { audio?: Partial<AudioProps> },
+): Clip {
+  const { audio: audioExtra, ...clipExtra } = extra ?? {};
+  return {
     id: newId("clip"),
-    payload: { type: "media", asset_id: asset.id, src_in: srcIn * S, src_out: srcOut * S },
-    start: start * S,
-    duration: (srcOut - srcIn) * S,
+    payload: { type: "media", asset_id: asset.id, src_in: srcInS * S, src_out: srcOutS * S },
+    start: startS * S,
+    duration: (srcOutS - srcInS) * S,
     speed: 1,
-    gain_db: 0,
-    fade_in_us: 0,
-    fade_out_us: 0,
-    opacity: 1,
-    label,
-    ...extra,
-  });
+    effects: [],
+    transform: structuredClone(DEFAULT_TRANSFORM),
+    audio: { ...structuredClone(DEFAULT_AUDIO), ...audioExtra },
+    transition_in: null,
+    label_color: null,
+    ...clipExtra,
+  };
+}
 
-  const tracks: Track[] = [
-    {
-      id: newId("track"),
-      kind: "audio",
-      name: "A2",
-      muted: false,
-      solo: false,
-      locked: false,
-      volume_db: -12,
-      clips: [
-        mediaClip(musica, 0, 46, 0, "musica_lofi.mp3", {
-          gain_db: -14,
-          fade_in_us: 1.5 * S,
-          fade_out_us: 3 * S,
-        }),
-      ],
-    },
-    {
-      id: newId("track"),
-      kind: "audio",
-      name: "A1",
-      muted: false,
-      solo: false,
-      locked: false,
-      volume_db: 0,
-      clips: [
-        mediaClip(voz, 0, 7.5, 0.8, "voz_off.wav"),
-        mediaClip(voz, 8.1, 16.4, 8.3, "voz_off.wav"),
-        mediaClip(voz, 17.0, 29.2, 16.7, "voz_off.wav"),
-        mediaClip(voz, 30.1, 41.0, 29.0, "voz_off.wav"),
-      ],
-    },
-    {
-      id: newId("track"),
-      kind: "video",
-      name: "V1",
-      muted: false,
-      solo: false,
-      locked: false,
-      volume_db: 0,
-      clips: [
-        mediaClip(cam, 2, 10.5, 0, "intro_camara.mp4"),
-        mediaClip(screen, 12, 26, 8.5, "pantalla_codigo.mp4"),
-        mediaClip(gameplay, 5, 19.5, 22.5, "gameplay_fisicas.mp4"),
-        mediaClip(cam, 14, 22, 37, "intro_camara.mp4"),
-      ],
-    },
-    {
-      id: newId("track"),
-      kind: "video",
-      name: "V2",
-      muted: false,
-      solo: false,
-      locked: false,
-      volume_db: 0,
-      clips: [
-        {
-          id: newId("clip"),
-          payload: { type: "text", content: "CÓMO HICE UN MOTOR DE FÍSICAS" },
-          start: 1.2 * S,
-          duration: 4.4 * S,
-          speed: 1,
-          gain_db: 0,
-          fade_in_us: 0,
-          fade_out_us: 0,
-          opacity: 1,
-          label: "Título",
-        },
-        {
-          id: newId("clip"),
-          payload: { type: "text", content: "suscríbete →" },
-          start: 30 * S,
-          duration: 3.5 * S,
-          speed: 1,
-          gain_db: 0,
-          fade_in_us: 0,
-          fade_out_us: 0,
-          opacity: 1,
-          label: "CTA",
-        },
-      ],
-    },
-  ];
+function textClip(content: string, startS: number, durationS: number): Clip {
+  return {
+    id: newId("clip"),
+    payload: { type: "text", content, style: structuredClone(DEFAULT_TEXT_STYLE) },
+    start: startS * S,
+    duration: durationS * S,
+    speed: 1,
+    effects: [],
+    transform: structuredClone(DEFAULT_TRANSFORM),
+    audio: structuredClone(DEFAULT_AUDIO),
+    transition_in: null,
+    label_color: null,
+  };
+}
+
+function track(kind: Track["kind"], name: string, clips: Clip[], volumeDb = 0): Track {
+  return {
+    id: newId("track"),
+    kind,
+    name,
+    muted: false,
+    solo: false,
+    locked: false,
+    volume_db: volumeDb,
+    clips,
+  };
+}
+
+export function demoProject(): Project {
+  const cam = makeAsset("video", "media/intro_camara.mp4", 28);
+  const gameplay = makeAsset("video", "media/gameplay_fisicas.mp4", 84, {
+    fps: [60, 1],
+    width: 2560,
+    height: 1440,
+    vcodec: "hevc",
+  });
+  const screen = makeAsset("video", "media/pantalla_codigo.mp4", 152, {
+    audio_channels: 0,
+    acodec: null,
+  });
+  const voz = makeAsset("audio", "media/voz_off.wav", 58, { acodec: "pcm_s16le", audio_channels: 1 });
+  const musica = makeAsset("audio", "media/musica_lofi.mp3", 130, { acodec: "mp3" });
+  const logo = makeAsset("image", "media/logo_canal.png", 0);
 
   const seq: Sequence = {
     id: newId("seq"),
     name: "Principal",
     resolution: [1920, 1080],
     fps: [30, 1],
-    tracks,
+    sample_rate: 48000,
     markers: [
       { id: newId("mk"), t: 8.5 * S, name: "Demo código", color: "#6fa3b5" },
       { id: newId("mk"), t: 22.5 * S, name: "Gameplay", color: "#8fb573" },
     ],
+    tracks: [
+      track(
+        "audio",
+        "A2",
+        [mediaClip(musica, 0, 46, 0, { audio: { gain_db: -14, fade_in_us: 1.5 * S, fade_out_us: 3 * S } })],
+        -12,
+      ),
+      track("audio", "A1", [
+        mediaClip(voz, 0, 7.5, 0.8),
+        mediaClip(voz, 8.1, 16.4, 8.3),
+        mediaClip(voz, 17.0, 29.2, 16.7),
+        mediaClip(voz, 30.1, 41.0, 29.0),
+      ]),
+      track("video", "V1", [
+        mediaClip(cam, 2, 10.5, 0),
+        mediaClip(screen, 12, 26, 8.5),
+        mediaClip(gameplay, 5, 19.5, 22.5),
+        mediaClip(cam, 14, 22, 37),
+      ]),
+      track("video", "V2", [
+        textClip("CÓMO HICE UN MOTOR DE FÍSICAS", 1.2, 4.4),
+        textClip("suscríbete →", 30, 3.5),
+      ]),
+    ],
   };
 
   return {
+    schema_version: 1,
+    id: newId("proj"),
     name: "Devlog 12 — Motor de físicas",
-    assets,
+    created_at: "",
+    settings: { whisper_language: "auto", autosave_secs: 60 },
+    assets: [cam, gameplay, screen, voz, musica, logo],
+    transcripts: [],
     sequences: [seq],
     active_sequence: seq.id,
   };

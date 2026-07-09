@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Clip, Project, Track } from "../engine/types";
+import { activeSequence, clipDisplayName } from "../engine/types";
 import { hash32, mulberry32, usToDuration } from "../lib/time";
 import { useStore } from "../state/store";
 
@@ -38,7 +39,7 @@ interface DragGhost {
 }
 
 function displayTracks(project: Project): Track[] {
-  return [...project.sequences[0].tracks].reverse();
+  return [...activeSequence(project).tracks].reverse();
 }
 
 function trackTops(tracks: Track[]): number[] {
@@ -98,7 +99,7 @@ function drawRuler(
   }
 
   // marcadores de secuencia
-  for (const m of project.sequences[0].markers) {
+  for (const m of activeSequence(project).markers) {
     const x = usToX(m.t);
     if (x < -10 || x > w + 10) continue;
     ctx.fillStyle = m.color ?? COLORS.inkDim;
@@ -133,6 +134,7 @@ function drawClip(
   ctx: CanvasRenderingContext2D,
   clip: Clip,
   track: Track,
+  label: string,
   x: number,
   y: number,
   w: number,
@@ -181,8 +183,8 @@ function drawClip(
     }
     // fades como rampas oscuras
     const fadeW = (us: number) => (us / 1e6) * ((w / clip.duration) * 1e6);
-    if (clip.fade_in_us > 0) {
-      const fw = fadeW(clip.fade_in_us);
+    if (clip.audio.fade_in_us > 0) {
+      const fw = fadeW(clip.audio.fade_in_us);
       ctx.fillStyle = "rgba(0,0,0,0.4)";
       ctx.beginPath();
       ctx.moveTo(x, y);
@@ -191,8 +193,8 @@ function drawClip(
       ctx.closePath();
       ctx.fill();
     }
-    if (clip.fade_out_us > 0) {
-      const fw = fadeW(clip.fade_out_us);
+    if (clip.audio.fade_out_us > 0) {
+      const fw = fadeW(clip.audio.fade_out_us);
       ctx.fillStyle = "rgba(0,0,0,0.4)";
       ctx.beginPath();
       ctx.moveTo(x + w, y);
@@ -218,7 +220,6 @@ function drawClip(
   }
 
   // etiqueta
-  const label = clip.label ?? "";
   if (label && w > 46) {
     ctx.fillStyle = "rgba(233,228,219,0.9)";
     ctx.font = '500 9.5px "Inter", sans-serif';
@@ -285,21 +286,43 @@ function drawTimeline(
       const x = usToX(clip.start);
       const cw = (clip.duration / 1e6) * view.pxPerSec;
       if (x + cw < 0 || x > w) continue;
-      drawClip(ctx, clip, t, x, tops[i] + 3, cw, th - 6, selection.includes(clip.id), false);
+      drawClip(
+        ctx,
+        clip,
+        t,
+        clipDisplayName(clip, project),
+        x,
+        tops[i] + 3,
+        cw,
+        th - 6,
+        selection.includes(clip.id),
+        false,
+      );
     }
   });
 
   // fantasma de drag
   if (ghost && ghost.moved) {
-    const found = project.sequences[0].tracks
-      .flatMap((t) => t.clips.map((c) => ({ c, t })))
+    const found = activeSequence(project)
+      .tracks.flatMap((t) => t.clips.map((c) => ({ c, t })))
       .find(({ c }) => c.id === ghost.clipId);
     if (found) {
       const t = tracks[ghost.trackIdx] ?? found.t;
       const th = trackHeight(t);
       const x = usToX(ghost.startUs);
       const cw = (found.c.duration / 1e6) * view.pxPerSec;
-      drawClip(ctx, found.c, t, x, tops[ghost.trackIdx] + 3, cw, th - 6, true, true);
+      drawClip(
+        ctx,
+        found.c,
+        t,
+        clipDisplayName(found.c, project),
+        x,
+        tops[ghost.trackIdx] + 3,
+        cw,
+        th - 6,
+        true,
+        true,
+      );
     }
   }
 
@@ -342,7 +365,7 @@ function TrackHeader({ track }: { track: Track }) {
         active ? "bg-accent text-bg0" : "bg-bg3 text-ink-faint hover:text-ink"
       }`}
       title={title}
-      onClick={() => toggleTrack(track.id, prop)}
+      onClick={() => void toggleTrack(track.id, prop)}
     >
       {label}
     </button>
@@ -530,7 +553,7 @@ export function Timeline() {
       setGhost((g) => {
         if (drag && g && g.moved) {
           const tracks = displayTracks(project);
-          moveClip(drag.clipId, tracks[g.trackIdx].id, g.startUs);
+          void moveClip(drag.clipId, tracks[g.trackIdx].id, g.startUs);
         }
         return null;
       });
@@ -557,7 +580,7 @@ export function Timeline() {
   };
 
   const zoomFit = () => {
-    const seq = project.sequences[0];
+    const seq = activeSequence(project);
     const end = Math.max(...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)), 1e6);
     setView(0, Math.max(2, ((size.w - 60) / end) * 1e6));
   };
@@ -570,21 +593,21 @@ export function Timeline() {
         <h2 className="panel-eyebrow mr-2">Línea de tiempo</h2>
         <button
           className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
-          onClick={splitAtPlayhead}
+          onClick={() => void splitAtPlayhead()}
           title="Dividir en el playhead (S)"
         >
           ✂ Dividir
         </button>
         <button
           className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
-          onClick={() => deleteSelection(false)}
+          onClick={() => void deleteSelection(false)}
           title="Eliminar selección (Supr)"
         >
           Eliminar
         </button>
         <button
           className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
-          onClick={() => deleteSelection(true)}
+          onClick={() => void deleteSelection(true)}
           title="Eliminar y cerrar hueco (⇧Supr)"
         >
           Eliminar y cerrar

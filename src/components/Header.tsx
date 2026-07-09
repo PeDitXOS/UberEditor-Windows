@@ -1,11 +1,12 @@
-import { engineCanRedo, engineCanUndo, useStore } from "../state/store";
+import { useStore } from "../state/store";
 
 export function Header() {
   const project = useStore((s) => s.project);
   const dirty = useStore((s) => s.dirty);
+  const canUndo = useStore((s) => s.canUndo);
+  const canRedo = useStore((s) => s.canRedo);
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
-  useStore((s) => s.version); // re-render al mutar
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-bg1 px-3">
@@ -29,16 +30,16 @@ export function Header() {
 
       <button
         className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim enabled:hover:bg-bg3 enabled:hover:text-ink disabled:opacity-40"
-        onClick={undo}
-        disabled={!engineCanUndo()}
+        onClick={() => void undo()}
+        disabled={!canUndo}
         title="Deshacer (⌘Z)"
       >
         ↶ Deshacer
       </button>
       <button
         className="focus-ring rounded-md px-2.5 py-1.5 text-[12px] text-ink-dim enabled:hover:bg-bg3 enabled:hover:text-ink disabled:opacity-40"
-        onClick={redo}
-        disabled={!engineCanRedo()}
+        onClick={() => void redo()}
+        disabled={!canRedo}
         title="Rehacer (⇧⌘Z)"
       >
         ↷ Rehacer
