@@ -432,8 +432,14 @@ export class MockEngine implements EngineClient {
     throw new Error("Eliminar silencios requiere la app de escritorio (npx tauri dev)");
   }
 
-  async mcpStatus(): Promise<number | null> {
+  async mcpStatus(): Promise<[number, string] | null> {
     return null;
+  }
+  async setProjectSettings(lang: string, model: string): Promise<StateSnapshot> {
+    return this.transaction("Ajustes de IA", () => {
+      this.project.settings.whisper_language = lang;
+      this.project.settings.whisper_model = model;
+    });
   }
 
   async cancelExport(): Promise<void> {}
@@ -717,7 +723,7 @@ export function demoProject(): Project {
     id: newId("proj"),
     name: "Devlog 12 — Motor de físicas",
     created_at: "",
-    settings: { whisper_language: "auto", autosave_secs: 60 },
+    settings: { whisper_language: "auto", whisper_model: "base", autosave_secs: 60 },
     assets: [cam, gameplay, screen, voz, musica, logo],
     transcripts: [vozTranscript],
     sequences: [seq],

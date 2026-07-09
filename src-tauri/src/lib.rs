@@ -31,6 +31,7 @@ pub struct AppState {
     pub effects_dir: Mutex<Option<PathBuf>>,
     pub mcp_port: Mutex<Option<u16>>,
     pub mcp_shutdown: AtomicBool,
+    pub mcp_token: Mutex<String>,
     pub models_dir: Mutex<Option<PathBuf>>,
 }
 
@@ -49,6 +50,7 @@ impl AppState {
             effects_dir: Mutex::new(None),
             mcp_port: Mutex::new(None),
             mcp_shutdown: AtomicBool::new(false),
+            mcp_token: Mutex::new(Id::new().to_string().to_lowercase()),
             models_dir: Mutex::new(None),
         }
     }
@@ -261,6 +263,20 @@ fn parse_id(s: &str) -> Result<Id, String> {
 }
 
 type Res<T> = Result<T, String>;
+
+#[tauri::command]
+fn set_project_settings(
+    state: State<AppState>,
+    whisper_language: String,
+    whisper_model: String,
+) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    store.project.settings.whisper_language = whisper_language;
+    store.project.settings.whisper_model = whisper_model;
+    store.version += 1;
+    store.dirty = true;
+    Ok(snapshot(&store))
+}
 
 #[tauri::command]
 fn get_state(state: State<AppState>) -> Res<StateSnapshot> {
@@ -978,10 +994,18 @@ fn transcribe_asset(
             .ok_or("sin carpeta de modelos")?;
         (PathBuf::from(conform), models)
     };
-    let model_name = model.unwrap_or_else(|| "base".into());
+    let (settings_model, settings_lang) = {
+        let store = state.store.lock().unwrap();
+        (
+            store.project.settings.whisper_model.clone(),
+            store.project.settings.whisper_language.clone(),
+        )
+    };
+    let model_name = model.unwrap_or(settings_model);
+    let lang: Option<String> = (settings_lang != "auto").then_some(settings_lang);
     std::thread::spawn(move || {
         let result = ue_whisper::ensure_model(&models_dir, &model_name)
-            .and_then(|m| ue_whisper::transcribe(&conform, &m, None, id));
+            .and_then(|m| ue_whisper::transcribe(&conform, &m, lang.as_deref(), id));
         let state = app.state::<AppState>();
         match result {
             Ok(doc) => {
@@ -1005,10 +1029,14 @@ fn transcribe_asset(
 /// Elimina los silencios de un clip (corta y cierra huecos en TODAS las
 /// pistas: una sola entrada de undo). Requiere el audio conformado.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn remove_silences(
     state: State<AppState>,
     clip_id: String,
     mode: Option<String>,
+    threshold_db: Option<f64>,
+    min_silence_ms: Option<i64>,
+    pad_ms: Option<i64>,
 ) -> Res<serde_json::Value> {
     let id = parse_id(&clip_id)?;
     let mut store = state.store.lock().unwrap();
@@ -1022,7 +1050,17 @@ fn remove_silences(
         .clone()
         .ok_or("el audio aún se está preparando (conformado); prueba en unos segundos")?;
     let wav = ue_audio::wav::WavMap::open(Path::new(&conform)).map_err(|e| e.to_string())?;
-    let params = ue_ai::silence::SilenceParams::default();
+    let mut params = ue_ai::silence::SilenceParams::default();
+    if let Some(db) = threshold_db {
+        params.threshold_db = db.clamp(-80.0, -10.0);
+    }
+    if let Some(ms) = min_silence_ms {
+        params.min_silence_us = (ms.clamp(50, 5000)) * 1000;
+    }
+    if let Some(ms) = pad_ms {
+        params.pad_pre_us = (ms.clamp(0, 1000)) * 1000;
+        params.pad_post_us = (ms.clamp(0, 1000)) * 1000;
+    }
     let ranges =
         ue_ai::silence::clip_silences_on_timeline(&wav, clip.start, src_in, src_out, &params);
     if ranges.is_empty() {
@@ -1146,10 +1184,11 @@ fn set_clip_transition(
     Ok(snapshot(&store))
 }
 
-/// Puerto del servidor MCP embebido (None si no pudo arrancar).
+/// (puerto, token) del servidor MCP embebido (None si no pudo arrancar).
 #[tauri::command]
-fn mcp_status(state: State<AppState>) -> Option<u16> {
-    *state.mcp_port.lock().unwrap()
+fn mcp_status(state: State<AppState>) -> Option<(u16, String)> {
+    let port = (*state.mcp_port.lock().unwrap())?;
+    Some((port, state.mcp_token.lock().unwrap().clone()))
 }
 
 #[tauri::command]
@@ -1325,7 +1364,10 @@ pub fn run() {
             match mcp::start(app.handle().clone()) {
                 Some(port) => {
                     *state.mcp_port.lock().unwrap() = Some(port);
-                    eprintln!("[mcp] escuchando en http://127.0.0.1:{port}/mcp");
+                    let token = state.mcp_token.lock().unwrap().clone();
+                    eprintln!(
+                        "[mcp] escuchando en http://127.0.0.1:{port}/mcp (token: {token})"
+                    );
                 }
                 None => eprintln!("[mcp] no se pudo abrir el puerto {}", mcp::MCP_PORT),
             }
@@ -1333,6 +1375,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            set_project_settings,
             split_clip,
             delete_clips,
             move_clip,

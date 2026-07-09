@@ -37,8 +37,14 @@ pub struct Project {
 pub struct ProjectSettings {
     #[serde(default = "default_lang")]
     pub whisper_language: String,
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model: String,
     #[serde(default = "default_autosave")]
     pub autosave_secs: u32,
+}
+
+fn default_whisper_model() -> String {
+    "base".into()
 }
 
 fn default_lang() -> String {
@@ -50,7 +56,11 @@ fn default_autosave() -> u32 {
 
 impl Default for ProjectSettings {
     fn default() -> Self {
-        Self { whisper_language: default_lang(), autosave_secs: default_autosave() }
+        Self {
+            whisper_language: default_lang(),
+            whisper_model: default_whisper_model(),
+            autosave_secs: default_autosave(),
+        }
     }
 }
 

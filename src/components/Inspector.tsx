@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { Clip, EffectDef, EffectInstance } from "../engine/types";
 import {
   activeSequence,
@@ -65,6 +67,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ClipInspector({ clip }: { clip: Clip }) {
+  const [silenceDb, setSilenceDb] = useState(-38);
+  const [silenceMs, setSilenceMs] = useState(400);
+  const [padMs, setPadMs] = useState(150);
   const project = useStore((s) => s.project);
   const setClipAudio = useStore((s) => s.setClipAudio);
   const setClipTransform = useStore((s) => s.setClipTransform);
@@ -263,17 +268,52 @@ function ClipInspector({ clip }: { clip: Clip }) {
 
       {clip.payload.type === "media" && asset && asset.probe.audio_channels > 0 && (
         <Section title="Silencios">
-          <div className="flex gap-1.5">
+          <Row label="Umbral">
+            <Slider
+              value={silenceDb}
+              min={-70}
+              max={-15}
+              step={1}
+              unit=" dB"
+              onChange={setSilenceDb}
+            />
+          </Row>
+          <Row label="Mín. silencio">
+            <Slider
+              value={silenceMs}
+              min={100}
+              max={1500}
+              step={50}
+              unit=" ms"
+              onChange={setSilenceMs}
+            />
+          </Row>
+          <Row label="Margen">
+            <Slider value={padMs} min={0} max={500} step={10} unit=" ms" onChange={setPadMs} />
+          </Row>
+          <div className="mt-1 flex gap-1.5">
             <button
               className="focus-ring flex-1 rounded-md border border-line bg-bg2 px-2 py-2 text-[12px] text-ink hover:bg-bg3"
-              onClick={() => void removeSilences(clip.id, "delete")}
+              onClick={() =>
+                void removeSilences(clip.id, "delete", {
+                  thresholdDb: silenceDb,
+                  minSilenceMs: silenceMs,
+                  padMs,
+                })
+              }
               title="Detecta silencios y los corta cerrando los huecos (1 deshacer)"
             >
               🔇 Eliminar
             </button>
             <button
               className="focus-ring flex-1 rounded-md border border-line bg-bg2 px-2 py-2 text-[12px] text-ink hover:bg-bg3"
-              onClick={() => void removeSilences(clip.id, "speedup")}
+              onClick={() =>
+                void removeSilences(clip.id, "speedup", {
+                  thresholdDb: silenceDb,
+                  minSilenceMs: silenceMs,
+                  padMs,
+                })
+              }
               title="Detecta silencios y los acelera 4× en lugar de cortarlos (1 deshacer)"
             >
               ⏩ Acelerar 4×
@@ -690,6 +730,7 @@ function EffectsPanel({ clip }: { clip: Clip }) {
 export function Inspector() {
   const selection = useStore((s) => s.selection);
   const project = useStore((s) => s.project);
+  const setAiSettings = useStore((s) => s.setAiSettings);
   useStore((s) => s.version);
 
   const seq = activeSequence(project);
@@ -714,6 +755,46 @@ export function Inspector() {
                 {seq.tracks.length} pistas · {(seq.sample_rate / 1000).toFixed(0)} kHz
               </div>
             </div>
+          </div>
+          <div className="mt-3 rounded-lg border border-line bg-bg2 p-3">
+            <h3 className="panel-eyebrow mb-2">IA · Whisper</h3>
+            <Row label="Modelo">
+              <select
+                className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg1 px-2 py-1 text-[12px] text-ink"
+                value={project.settings.whisper_model}
+                onChange={(e) =>
+                  void setAiSettings(project.settings.whisper_language, e.target.value)
+                }
+              >
+                {["tiny", "base", "small", "medium", "large-v3-turbo"].map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </Row>
+            <Row label="Idioma">
+              <select
+                className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg1 px-2 py-1 text-[12px] text-ink"
+                value={project.settings.whisper_language}
+                onChange={(e) =>
+                  void setAiSettings(e.target.value, project.settings.whisper_model)
+                }
+              >
+                {[
+                  ["auto", "Detectar"],
+                  ["es", "Español"],
+                  ["en", "Inglés"],
+                  ["pt", "Portugués"],
+                  ["fr", "Francés"],
+                  ["de", "Alemán"],
+                ].map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Row>
           </div>
           <p className="mt-3 text-[11px] leading-relaxed text-ink-faint">
             Selecciona un clip en la línea de tiempo para editar sus propiedades.

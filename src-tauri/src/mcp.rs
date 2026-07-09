@@ -103,10 +103,16 @@ fn tool_defs() -> Value {
         },
         {
             "name": "remove_silences",
-            "description": "Detecta y elimina los silencios de un clip (corta y cierra huecos en todas las pistas; una sola entrada de undo). El clip debe tener audio conformado.",
+            "description": "Detecta silencios de un clip y los corta (mode=delete) o acelera 4x (mode=speedup); todas las pistas, 1 undo. Parámetros opcionales de detección.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "clip_id": { "type": "string" } },
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["delete", "speedup"] },
+                    "threshold_db": { "type": "number", "description": "umbral dBFS (def -38)" },
+                    "min_silence_ms": { "type": "integer", "description": "silencio mínimo en ms (def 400)" },
+                    "pad_ms": { "type": "integer", "description": "margen alrededor del habla en ms (def 150)" }
+                },
                 "required": ["clip_id"]
             }
         },
@@ -277,7 +283,18 @@ fn call_tool(state: &AppState, name: &str, args: &Value) -> Value {
                 Err(e) => return tool_error(&e),
             };
             let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("delete").to_string();
-            match remove_silences_inner(state, clip_id, &mode) {
+            let mut params = ue_ai::silence::SilenceParams::default();
+            if let Some(db) = args.get("threshold_db").and_then(|v| v.as_f64()) {
+                params.threshold_db = db.clamp(-80.0, -10.0);
+            }
+            if let Some(ms) = args.get("min_silence_ms").and_then(|v| v.as_i64()) {
+                params.min_silence_us = ms.clamp(50, 5000) * 1000;
+            }
+            if let Some(ms) = args.get("pad_ms").and_then(|v| v.as_i64()) {
+                params.pad_pre_us = ms.clamp(0, 1000) * 1000;
+                params.pad_post_us = ms.clamp(0, 1000) * 1000;
+            }
+            match remove_silences_inner(state, clip_id, &mode, &params) {
                 Ok((n, us)) => text_result(json!({ "removed": n, "removed_us": us })),
                 Err(e) => tool_error(&e),
             }
@@ -322,7 +339,12 @@ fn generate_vertical_inner(state: &AppState) -> Result<String, String> {
     crate::generate_vertical_impl(state)
 }
 
-fn remove_silences_inner(state: &AppState, clip_id: ue_core::model::Id, mode: &str) -> Result<(usize, i64), String> {
+fn remove_silences_inner(
+    state: &AppState,
+    clip_id: ue_core::model::Id,
+    mode: &str,
+    params: &ue_ai::silence::SilenceParams,
+) -> Result<(usize, i64), String> {
     let mut store = state.store.lock().unwrap();
     let clip = store.project.clip(clip_id).ok_or("clip no encontrado")?.clone();
     let ue_core::model::ClipPayload::Media { asset_id, src_in, src_out } = clip.payload else {
@@ -332,9 +354,8 @@ fn remove_silences_inner(state: &AppState, clip_id: ue_core::model::Id, mode: &s
     let conform = asset.audio_conform.clone().ok_or("audio sin conformar todavía")?;
     let wav = ue_audio::wav::WavMap::open(std::path::Path::new(&conform))
         .map_err(|e| e.to_string())?;
-    let params = ue_ai::silence::SilenceParams::default();
     let ranges =
-        ue_ai::silence::clip_silences_on_timeline(&wav, clip.start, src_in, src_out, &params);
+        ue_ai::silence::clip_silences_on_timeline(&wav, clip.start, src_in, src_out, params);
     if ranges.is_empty() {
         return Ok((0, 0));
     }
@@ -443,6 +464,21 @@ pub fn start(app: tauri::AppHandle) -> Option<u16> {
                 let state = app.state::<AppState>();
                 if state.mcp_shutdown.load(Ordering::SeqCst) {
                     break;
+                }
+                // autenticación: Authorization: Bearer <token>
+                let expected = state.mcp_token.lock().unwrap().clone();
+                let authorized = request.headers().iter().any(|h| {
+                    h.field.as_str().as_str().eq_ignore_ascii_case("authorization")
+                        && h.value.as_str().trim() == format!("Bearer {expected}")
+                });
+                if !authorized {
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(
+                            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"token inválido: usa Authorization: Bearer <token> (visible en el pill MCP de la app)"}}"#,
+                        )
+                        .with_status_code(401),
+                    );
+                    continue;
                 }
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);

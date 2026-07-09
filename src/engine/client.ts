@@ -137,10 +137,12 @@ export interface EngineClient {
   removeSilences(
     clipId: Id,
     mode: "delete" | "speedup",
+    params?: { thresholdDb?: number; minSilenceMs?: number; padMs?: number },
   ): Promise<{ removed: number; removed_us: number; snapshot: StateSnapshot }>;
 
-  /** Puerto del servidor MCP embebido (null si no está activo). */
-  mcpStatus(): Promise<number | null>;
+  /** (puerto, token) del servidor MCP embebido (null si no está activo). */
+  mcpStatus(): Promise<[number, string] | null>;
+  setProjectSettings(whisperLanguage: string, whisperModel: string): Promise<StateSnapshot>;
 
   // -- progreso de export --
   cancelExport(): Promise<void>;

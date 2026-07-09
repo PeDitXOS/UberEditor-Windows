@@ -513,7 +513,7 @@ fn linked_pair_propagates_all_operations() {
     let mut aclip = Clip::new_media(va, 0, 10 * SEC, 0);
     aclip.group = Some(group);
     let v_id = store.insert_clip(vtrack, vclip, InsertMode::Strict).unwrap();
-    let a_id = store.insert_clip(atrack, aclip, InsertMode::Strict).unwrap();
+    let _a_id = store.insert_clip(atrack, aclip, InsertMode::Strict).unwrap();
 
     // SPLIT: divide ambos; las mitades derechas comparten grupo NUEVO
     let (vl, vr) = store.split_clip(v_id, 4 * SEC).unwrap();

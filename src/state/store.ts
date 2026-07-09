@@ -58,6 +58,8 @@ export interface UiState {
   newProject: () => Promise<void>;
   relinkAsset: (assetId: Id) => Promise<void>;
   mcpPort: number | null;
+  mcpToken: string | null;
+  setAiSettings: (lang: string, model: string) => Promise<void>;
   fonts: [string, string][];
   textTemplates: Record<string, TextStyle>;
   saveTextTemplate: (name: string, style: TextStyle) => Promise<void>;
@@ -66,7 +68,11 @@ export interface UiState {
   setClipTransition: (clipId: Id, transition: TransitionRef | null) => Promise<void>;
   reloadEffectPacks: () => Promise<void>;
   addTextClip: () => Promise<void>;
-  removeSilences: (clipId: Id, mode: "delete" | "speedup") => Promise<void>;
+  removeSilences: (
+    clipId: Id,
+    mode: "delete" | "speedup",
+    params?: { thresholdDb?: number; minSilenceMs?: number; padMs?: number },
+  ) => Promise<void>;
   setClipSpeed: (clipId: Id, speed: number) => Promise<void>;
   unlinkClip: (clipId: Id) => Promise<void>;
   transcribeAsset: (assetId: Id) => Promise<void>;
@@ -93,7 +99,7 @@ const emptyProject: Project = {
   id: "pending",
   name: "Cargando…",
   created_at: "",
-  settings: { whisper_language: "auto", autosave_secs: 60 },
+  settings: { whisper_language: "auto", whisper_model: "base", autosave_secs: 60 },
   assets: [],
   transcripts: [],
   sequences: [
@@ -159,7 +165,8 @@ export const useStore = create<UiState>((set, get) => {
         /* sin catálogo: el panel de efectos queda vacío */
       }
       try {
-        set({ mcpPort: await engine.mcpStatus() });
+        const status = await engine.mcpStatus();
+        if (status) set({ mcpPort: status[0], mcpToken: status[1] });
       } catch {
         /* sin MCP */
       }
@@ -303,6 +310,9 @@ export const useStore = create<UiState>((set, get) => {
     },
 
     mcpPort: null,
+    mcpToken: null,
+    setAiSettings: (lang, model) =>
+      run("Ajustes de IA", () => engine.setProjectSettings(lang, model)),
     fonts: [],
     textTemplates: {},
     saveTextTemplate: async (name, style) => {
@@ -363,10 +373,10 @@ export const useStore = create<UiState>((set, get) => {
       }
     },
 
-    removeSilences: async (clipId, mode) => {
+    removeSilences: async (clipId, mode, params) => {
       try {
         set({ lastActionLabel: "Analizando silencios…" });
-        const r = await engine.removeSilences(clipId, mode);
+        const r = await engine.removeSilences(clipId, mode, params);
         const secs = (r.removed_us / 1e6).toFixed(1);
         applySnapshot(
           r.snapshot,

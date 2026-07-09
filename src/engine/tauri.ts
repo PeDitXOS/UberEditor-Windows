@@ -248,12 +248,22 @@ export class TauriEngine implements EngineClient {
   removeSilences(
     clipId: Id,
     mode: "delete" | "speedup",
+    params?: { thresholdDb?: number; minSilenceMs?: number; padMs?: number },
   ): Promise<{ removed: number; removed_us: number; snapshot: StateSnapshot }> {
-    return invoke("remove_silences", { clipId, mode });
+    return invoke("remove_silences", {
+      clipId,
+      mode,
+      thresholdDb: params?.thresholdDb ?? null,
+      minSilenceMs: params?.minSilenceMs ?? null,
+      padMs: params?.padMs ?? null,
+    });
   }
 
-  mcpStatus(): Promise<number | null> {
+  mcpStatus(): Promise<[number, string] | null> {
     return invoke("mcp_status");
+  }
+  setProjectSettings(whisperLanguage: string, whisperModel: string): Promise<StateSnapshot> {
+    return invoke("set_project_settings", { whisperLanguage, whisperModel });
   }
 
   cancelExport(): Promise<void> {

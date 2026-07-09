@@ -222,6 +222,7 @@ export interface Sequence {
 
 export interface ProjectSettings {
   whisper_language: string;
+  whisper_model: string;
   autosave_secs: number;
 }
 

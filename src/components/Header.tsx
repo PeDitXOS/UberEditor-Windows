@@ -14,6 +14,7 @@ export function Header() {
   const newProject = useStore((s) => s.newProject);
   const exportProgress = useStore((s) => s.exportProgress);
   const mcpPort = useStore((s) => s.mcpPort);
+  const mcpToken = useStore((s) => s.mcpToken);
   const cancelExport = useStore((s) => s.cancelExport);
 
   return (
@@ -85,7 +86,7 @@ export function Header() {
         }`}
         title={
           mcpPort
-            ? `Servidor MCP activo: claude mcp add --transport http ubereditor http://127.0.0.1:${mcpPort}/mcp`
+            ? `Servidor MCP activo:\nclaude mcp add --transport http ubereditor http://127.0.0.1:${mcpPort}/mcp --header "Authorization: Bearer ${mcpToken ?? ""}"`
             : "El servidor MCP corre en la app de escritorio"
         }
       >
