@@ -318,11 +318,38 @@ export function activeSubtitleText(
   project: Project,
   clip: Clip,
   playheadUs: TimeUs,
-): { content: string; style: TextStyle } | null {
+): {
+  content: string;
+  style: TextStyle;
+  /** Karaoke: la frase troceada con la palabra actual/pasadas marcadas. */
+  spans?: { text: string; active: boolean }[];
+} | null {
   if (clip.payload.type !== "subtitles") return null;
   const { transcript_id, style, mode } = clip.payload;
   const doc = project.transcripts.find((t) => t.id === transcript_id);
   if (!doc) return null;
+
+  if (mode === "karaoke") {
+    // frase completa; cada palabra se enciende cuando suena
+    for (const seg of doc.segments) {
+      const tlStart = assetTimeToTimeline(project, doc.asset_id, seg.start_us);
+      if (tlStart === null) continue;
+      const from = Math.max(tlStart, clip.start);
+      const to = Math.min(tlStart + (seg.end_us - seg.start_us), clip.start + clip.duration);
+      if (playheadUs < from || playheadUs >= to) continue;
+      const words = doc.words.filter(
+        (w) => !w.rejected && w.start_us >= seg.start_us && w.start_us < seg.end_us,
+      );
+      if (!words.length) break;
+      const spans = words.map((w) => {
+        const wTl = assetTimeToTimeline(project, doc.asset_id, w.start_us) ?? tlStart;
+        return { text: w.text, active: playheadUs >= wTl };
+      });
+      return { content: seg.text, style, spans };
+    }
+    return null;
+  }
+
   const items =
     mode === "phrase"
       ? doc.segments.map((s) => ({ text: s.text, s: s.start_us, e: s.end_us }))

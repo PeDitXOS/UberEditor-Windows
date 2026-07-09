@@ -79,6 +79,8 @@ export interface EngineClient {
   ensureThumbs(assetId: Id): Promise<ThumbStrip | null>;
   /** Bytes JPEG de la tira ya generada. */
   getThumbStrip(assetId: Id): Promise<Uint8Array | null>;
+  /** Shuttle JKL: velocidad con signo; arranca desde fromUs si estaba pausado. */
+  playbackSetRate(rate: number, fromUs: TimeUs): Promise<void>;
   /** (posición, reproduciendo, RMS izq 0..1, RMS der 0..1). */
   playbackPosition(): Promise<[TimeUs, boolean, number, number]>;
 
@@ -121,6 +123,10 @@ export interface EngineClient {
 
   /** Rompe el enlace video↔audio del grupo del clip. */
   unlinkClip(clipId: Id): Promise<StateSnapshot>;
+  addTrack(kind: "video" | "audio"): Promise<StateSnapshot>;
+  removeTrack(trackId: Id): Promise<StateSnapshot>;
+  renameTrack(trackId: Id, name: string): Promise<StateSnapshot>;
+  setTrackVolume(trackId: Id, db: number): Promise<StateSnapshot>;
   setTrackProp(
     trackId: Id,
     prop: "muted" | "solo" | "locked",

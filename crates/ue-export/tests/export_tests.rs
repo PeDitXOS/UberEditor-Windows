@@ -1201,6 +1201,95 @@ fn word_mode_subtitles_burn_per_word() {
     assert_eq!(bright_at(2.4), 0, "las palabras rechazadas no se queman");
 }
 
+/// Karaoke: la frase entera visible y las palabras se encienden al sonar.
+#[test]
+fn karaoke_mode_highlights_words_progressively() {
+    let Some(dir) = media_dir() else { return };
+    let src = dir.join("black_words.mp4");
+    if !src.exists() {
+        let st = Command::new(ue_media::ffmpeg_bin())
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=3:r=30"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(st.success());
+    }
+
+    let mut project = Project::new("karaoke-subs");
+    let seq_id = project.active_sequence;
+    let asset = ue_media::import_file(&src).unwrap();
+    let aid = asset.id;
+    project.assets.push(asset);
+    let doc_id = Id::new();
+    project.transcripts.push(TranscriptDoc {
+        id: doc_id,
+        asset_id: aid,
+        language: "es".into(),
+        model: "t".into(),
+        words: vec![
+            Word { text: "UNO".into(), start_us: 300_000, end_us: 800_000, confidence: 1.0, rejected: false },
+            Word { text: "DOS".into(), start_us: 1_500_000, end_us: 2_000_000, confidence: 1.0, rejected: false },
+        ],
+        segments: vec![ue_core::model::Segment {
+            text: "UNO DOS".into(),
+            start_us: 200_000,
+            end_us: 2_600_000,
+            word_range: (0, 2),
+            emotion: None,
+            volume_rms: 0.0,
+        }],
+        global_avg_volume: 0.0,
+    });
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v2 = seq.tracks.last().unwrap().id;
+    let v1 = seq.tracks.iter().find(|t| t.kind == TrackKind::Video && t.name == "V1").unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(aid, 0, 3 * SEC, 0), InsertMode::Strict).unwrap();
+    let subs = Clip {
+        id: Id::new(),
+        payload: ClipPayload::Subtitles {
+            transcript_id: doc_id,
+            style: TextStyle { size: 90.0, y_offset: 380.0, ..Default::default() },
+            mode: SubtitleMode::Karaoke,
+        },
+        start: 0,
+        duration: 3 * SEC,
+        speed: 1.0,
+        effects: vec![],
+        transform: Default::default(),
+        audio: Default::default(),
+        transition_in: None,
+        label_color: None,
+        group: None,
+    };
+    store.insert_clip(v2, subs, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-karaoke-out.mp4");
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+
+    // ámbar de resaltado (#FFB224) en la banda de subtítulos
+    let accent_at = |t: f64| -> usize {
+        let mut n = 0;
+        for y in [880u32, 910, 940, 970] {
+            for x in (600..1400).step_by(12) {
+                let (r, g, b) = pixel_at(&out, t, x, y);
+                if r > 200 && (100..230).contains(&(g as i32)) && b < 100 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let early = accent_at(0.5); // UNO sonando, DOS aún tenue
+    let late = accent_at(1.7); // ambas encendidas
+    assert!(early >= 1, "UNO resaltada en t=0.5 (n={early})");
+    assert!(late > early, "el resaltado avanza: t=1.7 (n={late}) > t=0.5 (n={early})");
+    // antes del segmento no hay nada encendido
+    assert_eq!(accent_at(0.05), 0, "sin resaltado antes del segmento");
+}
+
 /// Enumeración de fuentes del sistema y resolución de familia → fontfile.
 #[test]
 fn system_fonts_enumerate_and_resolve() {

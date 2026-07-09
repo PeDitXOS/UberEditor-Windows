@@ -48,6 +48,12 @@ function useKeyboard() {
         const fps = activeSequence(s.project).fps;
         const step = frameToUs(1, fps) * (e.shiftKey ? 10 : 1);
         s.seek(s.playheadUs + (e.key === "ArrowLeft" ? -step : step));
+      } else if (e.key.toLowerCase() === "j" && !mod) {
+        s.shuttle(-1);
+      } else if (e.key.toLowerCase() === "k" && !mod) {
+        s.shuttle(0);
+      } else if (e.key.toLowerCase() === "l" && !mod) {
+        s.shuttle(1);
       } else if (e.key.toLowerCase() === "i" && !mod) {
         s.setRangeIn(Math.round(s.playheadUs));
       } else if (e.key.toLowerCase() === "o" && !mod) {
@@ -91,7 +97,9 @@ function usePlayback() {
       const dt = now - last;
       last = now;
       const s = useStore.getState();
-      useStore.setState({ playheadUs: s.playheadUs + dt * 1000 });
+      useStore.setState({
+        playheadUs: Math.max(0, s.playheadUs + dt * 1000 * s.shuttleRate),
+      });
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

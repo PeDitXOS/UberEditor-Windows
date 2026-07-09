@@ -12,6 +12,18 @@ function meterFill(rms: number): number {
   return Math.min(1, Math.max(0, (db + 60) / 60));
 }
 
+/** Indicador JKL cuando la velocidad no es 1× (J reversa, L acelera, K para). */
+function ShuttleBadge() {
+  const rate = useStore((s) => s.shuttleRate);
+  const playing = useStore((s) => s.playing);
+  if (!playing || rate === 1) return null;
+  return (
+    <span className="rounded-md border border-(--color-accent) px-2 py-1 font-[var(--font-mono)] text-[11px] text-(--color-accent)">
+      {rate < 0 ? "◀" : "▶"} {Math.abs(rate)}×
+    </span>
+  );
+}
+
 /** Medidores L/R compactos (escala dB, rojo por encima de -6 dB). */
 function AudioMeters() {
   const meterL = useStore((s) => s.meterL);
@@ -70,7 +82,11 @@ function drawOverlays(
   w: number,
   h: number,
   texts: Clip[],
-  subtitles: { content: string; style: { size: number; color: string; y_offset: number } }[] = [],
+  subtitles: {
+    content: string;
+    style: { size: number; color: string; y_offset: number; highlight_color?: string | null };
+    spans?: { text: string; active: boolean }[];
+  }[] = [],
 ) {
   // regla de tercios, sutil
   ctx.strokeStyle = "rgba(255,255,255,0.05)";
@@ -93,8 +109,25 @@ function drawOverlays(
     ctx.font = `600 ${Math.round(size)}px "Inter", sans-serif`;
     ctx.shadowColor = "rgba(0,0,0,0.85)";
     ctx.shadowBlur = 8;
-    ctx.fillStyle = sub.style.color;
-    ctx.fillText(sub.content, w / 2, y);
+    if (sub.spans?.length) {
+      // karaoke: frase centrada, palabras encendidas a su tiempo
+      const space = ctx.measureText(" ").width;
+      const widths = sub.spans.map((sp) => ctx.measureText(sp.text).width);
+      const total = widths.reduce((a, b) => a + b, 0) + space * (sub.spans.length - 1);
+      let x = w / 2 - total / 2;
+      ctx.textAlign = "left";
+      sub.spans.forEach((sp, i) => {
+        ctx.fillStyle = sp.active
+          ? (sub.style.highlight_color ?? "#FFB224")
+          : "rgba(233,228,219,0.4)";
+        ctx.fillText(sp.text, x, y);
+        x += widths[i] + space;
+      });
+      ctx.textAlign = "center";
+    } else {
+      ctx.fillStyle = sub.style.color;
+      ctx.fillText(sub.content, w / 2, y);
+    }
     ctx.shadowBlur = 0;
   }
   for (const t of texts) {
@@ -359,6 +392,7 @@ export function Preview() {
         <div className="flex-1" />
 
         <div className="flex items-center gap-2 text-[11px] text-ink-faint">
+          <ShuttleBadge />
           {engine.kind === "tauri" && <AudioMeters />}
           <span className="rounded-md border border-line px-2 py-1">
             {engine.kind === "tauri" ? "Motor: escritorio" : "Motor: navegador"}

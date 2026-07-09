@@ -11,6 +11,7 @@ ue-core = { path = "../ue-core" }
 ue-media = { path = "../ue-media" }
 ue-render = { path = "../ue-render" }
 fontdb = "0.16"
+ttf-parser = "0.20"
 
 [dev-dependencies]
 serde_json.workspace = true

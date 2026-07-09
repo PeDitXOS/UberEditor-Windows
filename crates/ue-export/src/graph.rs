@@ -190,6 +190,25 @@ pub fn find_font() -> Option<&'static str> {
 }
 
 /// Un drawtext con estilo del proyecto, activo en [from, to) del timeline.
+/// fontfile del estilo (familia resuelta con fontdb) o el fallback global.
+fn font_part_for(style: &ue_core::model::TextStyle, fallback: &str) -> String {
+    resolve_font_family(&style.font)
+        .map(|f| format!("fontfile={f}"))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Expresión x de drawtext según alineación y offset X del estilo.
+fn x_expr_for(style: &ue_core::model::TextStyle, scale: f64) -> String {
+    use ue_core::model::TextAlign;
+    let x_off = (style.x_offset as f64 * scale).round() as i64;
+    let margin = (48.0 * scale).round() as i64;
+    match style.align {
+        TextAlign::Left => format!("{}", margin + x_off),
+        TextAlign::Center => format!("(w-text_w)/2+{x_off}"),
+        TextAlign::Right => format!("w-text_w-{}", margin - x_off),
+    }
+}
+
 fn drawtext_for(
     font_part: &str,
     content: &str,
@@ -201,15 +220,70 @@ fn drawtext_for(
     let fontsize = ((style.size as f64) * scale).round().max(8.0) as u32;
     let color = style.color.trim_start_matches('#');
     let y_off = (style.y_offset as f64 * scale).round() as i64;
+    let font_part = font_part_for(style, font_part);
     format!(
         "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor=0x{color}:\
-         borderw={}:bordercolor=black@0.6:x=(w-text_w)/2:y=(h-text_h)/2+{y_off}:\
+         borderw={}:bordercolor=black@0.6:x={}:y=(h-text_h)/2+{y_off}:\
+         enable='between(t,{},{})'",
+        escape_drawtext(content),
+        (2.0 * scale).round().max(1.0) as u32,
+        x_expr_for(style, scale),
+        secs(from),
+        secs(to),
+    )
+}
+
+/// drawtext con expresión x explícita (karaoke: posiciones precalculadas).
+#[allow(clippy::too_many_arguments)]
+fn drawtext_at(
+    font_part: &str,
+    content: &str,
+    fontsize: u32,
+    color: &str,
+    x_expr: &str,
+    y_off: i64,
+    scale: f64,
+    from: TimeUs,
+    to: TimeUs,
+) -> String {
+    format!(
+        "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor={color}:\
+         borderw={}:bordercolor=black@0.6:x={x_expr}:y=(h-text_h)/2+{y_off}:\
          enable='between(t,{},{})'",
         escape_drawtext(content),
         (2.0 * scale).round().max(1.0) as u32,
         secs(from),
         secs(to),
     )
+}
+
+/// Ancho en px de `text` con la fuente `path` a tamaño `px` (suma de avances).
+fn measure_text_px(path: &str, text: &str, px: f64) -> Option<f64> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, std::sync::Arc<Vec<u8>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let data = {
+        let mut guard = cache.lock().unwrap();
+        match guard.get(path) {
+            Some(d) => d.clone(),
+            None => {
+                let d = std::sync::Arc::new(std::fs::read(path).ok()?);
+                guard.insert(path.to_string(), d.clone());
+                d
+            }
+        }
+    };
+    let face = ttf_parser::Face::parse(&data, 0).ok()?;
+    let upem = face.units_per_em() as f64;
+    let mut units = 0.0f64;
+    for c in text.chars() {
+        units += match face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)) {
+            Some(adv) => adv as f64,
+            None => upem * 0.5, // glifo desconocido: media em
+        };
+    }
+    Some(units / upem * px)
 }
 
 /// Tiempo de asset → timeline via el primer clip media que lo contiene.
@@ -229,6 +303,81 @@ fn asset_time_to_timeline(
         }
     }
     None
+}
+
+/// Karaoke: por segmento, cada palabra en color tenue durante toda la frase y
+/// en color resaltado desde que se pronuncia hasta el final del segmento.
+/// None si no hay fontfile medible (el caller cae al modo palabra).
+fn karaoke_overlays(
+    seq: &ue_core::model::Sequence,
+    doc: &ue_core::model::TranscriptDoc,
+    clip: &ue_core::model::Clip,
+    style: &ue_core::model::TextStyle,
+    fallback_font: &str,
+    scale: f64,
+) -> Option<Vec<String>> {
+    let font_part = font_part_for(style, fallback_font);
+    let font_path = font_part.strip_prefix("fontfile=")?.to_string();
+    let px = ((style.size as f64) * scale).round().max(8.0);
+    let fontsize = px as u32;
+    let y_off = (style.y_offset as f64 * scale).round() as i64;
+    let base_color = format!("0x{}@0.4", style.color.trim_start_matches('#'));
+    let hi_color = format!(
+        "0x{}",
+        style
+            .highlight_color
+            .as_deref()
+            .unwrap_or("#FFB224")
+            .trim_start_matches('#')
+    );
+    let space_w = measure_text_px(&font_path, " ", px)?;
+
+    let mut out = vec![];
+    for seg in &doc.segments {
+        let words: Vec<&ue_core::model::Word> = doc
+            .words
+            .iter()
+            .filter(|w| !w.rejected && w.start_us >= seg.start_us && w.start_us < seg.end_us)
+            .collect();
+        if words.is_empty() {
+            continue;
+        }
+        // ventana del segmento en el timeline, recortada al clip
+        let Some(seg_tl) = asset_time_to_timeline(seq, doc.asset_id, seg.start_us) else {
+            continue;
+        };
+        let seg_from = seg_tl.max(clip.start);
+        let seg_to = (seg_tl + (seg.end_us - seg.start_us)).min(clip.end());
+        if seg_to <= seg_from {
+            continue;
+        }
+        // layout de la línea: anchos por palabra + espacios
+        let widths: Vec<f64> = words
+            .iter()
+            .map(|w| measure_text_px(&font_path, &w.text, px).unwrap_or(px * 0.5))
+            .collect();
+        let total: f64 =
+            widths.iter().sum::<f64>() + space_w * (words.len().saturating_sub(1)) as f64;
+        let mut prefix = 0.0f64;
+        for (i, w) in words.iter().enumerate() {
+            let x_expr = format!("(w-{total:.0})/2+{prefix:.0}");
+            let word_tl = asset_time_to_timeline(seq, doc.asset_id, w.start_us)
+                .unwrap_or(seg_tl)
+                .max(clip.start);
+            // capa tenue (toda la frase visible durante el segmento)
+            out.push(drawtext_at(
+                &font_part, &w.text, fontsize, &base_color, &x_expr, y_off, scale, seg_from,
+                seg_to,
+            ));
+            // capa resaltada (desde que suena la palabra)
+            out.push(drawtext_at(
+                &font_part, &w.text, fontsize, &hi_color, &x_expr, y_off, scale,
+                word_tl.min(seg_to), seg_to,
+            ));
+            prefix += widths[i] + space_w;
+        }
+    }
+    Some(out)
 }
 
 /// Cadena drawtext para títulos y subtítulos automáticos de la secuencia.
@@ -268,7 +417,18 @@ fn build_text_overlays(
                         continue;
                     };
                     use ue_core::model::SubtitleMode;
-                    // modo frase: una línea por segmento; modo palabra/karaoke:
+                    // karaoke: frase completa con la palabra actual resaltada
+                    // (relleno progresivo); necesita métricas de la fuente
+                    if *mode == SubtitleMode::Karaoke {
+                        if let Some(chains) =
+                            karaoke_overlays(seq, doc, clip, style, &font_part, scale)
+                        {
+                            parts.extend(chains);
+                            continue;
+                        }
+                        // sin métricas → cae al modo palabra
+                    }
+                    // modo frase: una línea por segmento; modo palabra:
                     // una palabra grande cada vez (estilo shorts)
                     let items: Vec<(&str, i64, i64)> = match mode {
                         SubtitleMode::Phrase => doc

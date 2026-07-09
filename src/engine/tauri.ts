@@ -118,6 +118,9 @@ export class TauriEngine implements EngineClient {
   playbackSeek(tUs: TimeUs): Promise<void> {
     return invoke("playback_seek", { tUs });
   }
+  playbackSetRate(rate: number, fromUs: TimeUs): Promise<void> {
+    return invoke("playback_set_rate", { rate, fromUs });
+  }
   checkRecovery(): Promise<string | null> {
     return invoke("check_recovery", { path: null });
   }
@@ -218,6 +221,18 @@ export class TauriEngine implements EngineClient {
 
   unlinkClip(clipId: Id): Promise<StateSnapshot> {
     return invoke("unlink_clip", { clipId });
+  }
+  addTrack(kind: "video" | "audio"): Promise<StateSnapshot> {
+    return invoke("add_track", { kind });
+  }
+  removeTrack(trackId: Id): Promise<StateSnapshot> {
+    return invoke("remove_track", { trackId });
+  }
+  renameTrack(trackId: Id, name: string): Promise<StateSnapshot> {
+    return invoke("rename_track", { trackId, name });
+  }
+  setTrackVolume(trackId: Id, db: number): Promise<StateSnapshot> {
+    return invoke("set_track_volume", { trackId, db });
   }
   setTrackProp(
     trackId: Id,

@@ -499,6 +499,9 @@ function drawTimeline(
 
 function TrackHeader({ track }: { track: Track }) {
   const toggleTrack = useStore((s) => s.toggleTrack);
+  const removeTrack = useStore((s) => s.removeTrack);
+  const renameTrack = useStore((s) => s.renameTrack);
+  const setTrackVolume = useStore((s) => s.setTrackVolume);
   const btn = (
     active: boolean,
     label: string,
@@ -518,13 +521,18 @@ function TrackHeader({ track }: { track: Track }) {
 
   return (
     <div
-      className="flex items-center gap-1.5 border-b border-line-soft px-2"
+      className="group flex items-center gap-1.5 border-b border-line-soft px-2"
       style={{ height: trackHeight(track) + TRACK_GAP }}
     >
       <span
-        className={`w-7 shrink-0 font-[var(--font-display)] text-[12px] font-semibold ${
+        className={`w-7 shrink-0 cursor-text font-[var(--font-display)] text-[12px] font-semibold ${
           track.kind === "video" ? "text-clip-video-hi" : "text-clip-audio-hi"
         }`}
+        title="Doble click para renombrar"
+        onDoubleClick={() => {
+          const name = window.prompt("Nombre de la pista", track.name);
+          if (name) void renameTrack(track.id, name);
+        }}
       >
         {track.name}
       </span>
@@ -532,11 +540,43 @@ function TrackHeader({ track }: { track: Track }) {
       {btn(track.solo, "S", "Solo", "solo")}
       {btn(track.locked, "🔒", "Bloquear pista", "locked")}
       {track.kind === "audio" && (
-        <span className="ml-auto font-[var(--font-mono)] text-[9.5px] text-ink-faint">
+        <span
+          className="ml-auto cursor-ns-resize select-none font-[var(--font-mono)] text-[9.5px] text-ink-faint hover:text-ink"
+          title="Arrastra vertical para cambiar el volumen de la pista (doble click: 0 dB)"
+          onDoubleClick={() => void setTrackVolume(track.id, 0)}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startY = e.clientY;
+            const startDb = track.volume_db;
+            const onMove = (ev: MouseEvent) => {
+              const db = Math.round(startDb + (startY - ev.clientY) / 3);
+              void setTrackVolume(track.id, Math.max(-60, Math.min(12, db)));
+            };
+            const onUp = () => {
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+            };
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          }}
+        >
           {track.volume_db > 0 ? "+" : ""}
           {track.volume_db} dB
         </span>
       )}
+      <button
+        className={`${track.kind === "audio" ? "" : "ml-auto "}focus-ring h-5 w-5 rounded text-[10px] leading-none text-ink-faint opacity-0 transition-opacity hover:bg-bg3 hover:text-danger group-hover:opacity-100`}
+        title="Eliminar pista (deshacible)"
+        onClick={() => {
+          if (
+            track.clips.length === 0 ||
+            window.confirm(`La pista ${track.name} tiene ${track.clips.length} clip(s). ¿Eliminarla igualmente?`)
+          )
+            void removeTrack(track.id);
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 }
@@ -577,6 +617,7 @@ export function Timeline() {
   const addTextClip = useStore((s) => s.addTextClip);
   const generateVertical = useStore((s) => s.generateVertical);
   const setActiveSequence = useStore((s) => s.setActiveSequence);
+  const addTrack = useStore((s) => s.addTrack);
   const rangeInUs = useStore((s) => s.rangeInUs);
   const rangeOutUs = useStore((s) => s.rangeOutUs);
   const visualsBump = useStore((s) => s.visualsBump);
@@ -891,6 +932,20 @@ export function Timeline() {
           title="Genera una copia vertical 1080x1920 con fondo desenfocado (Shorts/Reels)"
         >
           📱 Vertical
+        </button>
+        <button
+          className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
+          onClick={() => void addTrack("video")}
+          title="Añadir pista de video"
+        >
+          +V
+        </button>
+        <button
+          className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
+          onClick={() => void addTrack("audio")}
+          title="Añadir pista de audio"
+        >
+          +A
         </button>
         {project.sequences.length > 1 && (
           <select

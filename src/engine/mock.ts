@@ -276,6 +276,7 @@ export class MockEngine implements EngineClient {
     throw new Error("sin audio en navegador");
   }
   async playbackSeek(): Promise<void> {}
+  async playbackSetRate(): Promise<void> {}
   async checkRecovery(): Promise<string | null> {
     return null;
   }
@@ -552,6 +553,46 @@ export class MockEngine implements EngineClient {
       const track = this.sequence.tracks.find((t) => t.id === trackId);
       if (!track) throw new Error("pista no encontrada");
       track[prop] = value;
+    });
+  }
+
+  async addTrack(kind: "video" | "audio"): Promise<StateSnapshot> {
+    return this.transaction("Añadir pista", () => {
+      const n = this.sequence.tracks.filter((t) => t.kind === kind).length;
+      this.sequence.tracks.push({
+        id: `trk_${Math.random().toString(36).slice(2, 8)}`,
+        kind,
+        name: `${kind === "video" ? "V" : "A"}${n + 1}`,
+        muted: false,
+        solo: false,
+        locked: false,
+        volume_db: 0,
+        clips: [],
+      });
+    });
+  }
+  async removeTrack(trackId: Id): Promise<StateSnapshot> {
+    return this.transaction("Eliminar pista", () => {
+      const tracks = this.sequence.tracks;
+      const idx = tracks.findIndex((t) => t.id === trackId);
+      if (idx < 0) throw new Error("pista no encontrada");
+      if (tracks.filter((t) => t.kind === tracks[idx].kind).length <= 1)
+        throw new Error("no se puede eliminar la última pista de su tipo");
+      tracks.splice(idx, 1);
+    });
+  }
+  async renameTrack(trackId: Id, name: string): Promise<StateSnapshot> {
+    return this.transaction("Renombrar pista", () => {
+      const track = this.sequence.tracks.find((t) => t.id === trackId);
+      if (!track) throw new Error("pista no encontrada");
+      track.name = name;
+    });
+  }
+  async setTrackVolume(trackId: Id, db: number): Promise<StateSnapshot> {
+    return this.transaction("Volumen de pista", () => {
+      const track = this.sequence.tracks.find((t) => t.id === trackId);
+      if (!track) throw new Error("pista no encontrada");
+      track.volume_db = db;
     });
   }
 }

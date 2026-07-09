@@ -495,12 +495,17 @@ function SubtitlesPanel({ clip }: { clip: Clip }) {
           className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg2 px-2 py-1 text-[12px] text-ink"
           value={mode}
           onChange={(e) =>
-            void setSubtitlesProps(clip.id, style, e.target.value as "phrase" | "word")
+            void setSubtitlesProps(
+              clip.id,
+              style,
+              e.target.value as "phrase" | "word" | "karaoke",
+            )
           }
-          title="Frase completa o palabra a palabra (estilo shorts)"
+          title="Frase completa, palabra a palabra (estilo shorts) o karaoke"
         >
           <option value="phrase">Por frases</option>
           <option value="word">Palabra a palabra</option>
+          <option value="karaoke">Karaoke (palabra resaltada)</option>
         </select>
       </Row>
       <Row label="Tamaño">

@@ -131,7 +131,9 @@ fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, runnin
         let reusable = session.as_ref().is_some_and(|s| {
             s.asset_path == path
                 && session_vf == vf
-                && src_t >= s.next_src_us() - 1_000_000 / PLAYBACK_FPS as i64
+                // hacia atrás (shuttle J): tolerar hasta 400 ms sin reabrir para
+                // no lanzar un ffmpeg por tick; el frame se congela ese margen
+                && src_t >= s.next_src_us() - 400_000
                 && src_t <= s.next_src_us() + 1_500_000
         });
         if !reusable {
@@ -751,6 +753,28 @@ fn get_thumb_strip(state: State<AppState>, asset_id: String) -> Res<tauri::ipc::
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Shuttle JKL: fija la velocidad de reproducción (negativa = reversa).
+/// Si no estaba sonando, arranca desde el playhead dado.
+#[tauri::command]
+fn playback_set_rate(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    rate: f64,
+    from_us: TimeUs,
+) -> Res<()> {
+    sync_player(&state)?;
+    {
+        let guard = state.player.lock().unwrap();
+        let p = guard.as_ref().ok_or("sin reproductor")?;
+        if !p.is_playing() {
+            p.play(from_us);
+        }
+        p.set_rate(rate);
+    }
+    start_frame_service(&app);
+    Ok(())
+}
+
 #[tauri::command]
 fn playback_seek(state: State<AppState>, t_us: TimeUs) -> Res<()> {
     if let Some(p) = state.player.lock().unwrap().as_ref() {
@@ -1343,6 +1367,87 @@ fn set_track_prop(
     Ok(snapshot(&store))
 }
 
+/// Añade una pista al final de su grupo (video arriba, audio abajo). Deshacible.
+#[tauri::command]
+fn add_track(state: State<AppState>, kind: String) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let seq_id = store.project.active_sequence;
+    let kind = match kind.as_str() {
+        "video" => TrackKind::Video,
+        "audio" => TrackKind::Audio,
+        other => return Err(format!("tipo de pista desconocido: {other}")),
+    };
+    let seq = store.project.sequence(seq_id).ok_or("sin secuencia")?;
+    let n = seq.tracks.iter().filter(|t| t.kind == kind).count();
+    let prefix = if kind == TrackKind::Video { "V" } else { "A" };
+    let track = ue_core::model::Track::new(kind, &format!("{prefix}{}", n + 1));
+    // video: al final del vec (se dibuja arriba); audio: también al final
+    let index = seq.tracks.len();
+    store
+        .dispatch(
+            "Añadir pista",
+            vec![ue_core::Action::AddTrack { sequence_id: seq_id, index, track }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+/// Elimina una pista (los clips que tuviera se van con ella; 1 undo la restaura).
+#[tauri::command]
+fn remove_track(state: State<AppState>, track_id: String) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&track_id)?;
+    let seq_id = store.project.active_sequence;
+    let seq = store.project.sequence(seq_id).ok_or("sin secuencia")?;
+    // no dejar la secuencia sin pistas de un tipo
+    let kind = seq.tracks.iter().find(|t| t.id == id).ok_or("pista no encontrada")?.kind;
+    if seq.tracks.iter().filter(|t| t.kind == kind).count() <= 1 {
+        return Err("no se puede eliminar la última pista de su tipo".into());
+    }
+    store
+        .dispatch("Eliminar pista", vec![ue_core::Action::RemoveTrack { track_id: id }])
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+/// Renombra una pista (deshacible).
+#[tauri::command]
+fn rename_track(state: State<AppState>, track_id: String, name: String) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&track_id)?;
+    let name = name.trim().to_string();
+    if name.is_empty() || name.len() > 24 {
+        return Err("nombre de pista inválido".into());
+    }
+    store
+        .dispatch(
+            "Renombrar pista",
+            vec![ue_core::Action::SetTrackProp {
+                track_id: id,
+                prop: ue_core::action::TrackProp::Name(name),
+            }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
+/// Volumen de pista en dB (deshacible).
+#[tauri::command]
+fn set_track_volume(state: State<AppState>, track_id: String, db: f32) -> Res<StateSnapshot> {
+    let mut store = state.store.lock().unwrap();
+    let id = parse_id(&track_id)?;
+    store
+        .dispatch(
+            "Volumen de pista",
+            vec![ue_core::Action::SetTrackProp {
+                track_id: id,
+                prop: ue_core::action::TrackProp::VolumeDb(db.clamp(-60.0, 12.0)),
+            }],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(snapshot(&store))
+}
+
 #[tauri::command]
 fn set_clip_transition(
     state: State<AppState>,
@@ -1686,6 +1791,10 @@ pub fn run() {
             set_clip_effects,
             set_clip_transition,
             set_track_prop,
+            add_track,
+            remove_track,
+            rename_track,
+            set_track_volume,
             add_text_clip,
             set_clip_text,
             remove_silences,
@@ -1700,6 +1809,7 @@ pub fn run() {
             playback_pause,
             playback_seek,
             playback_position,
+            playback_set_rate,
             get_audio_peaks,
             ensure_thumbs,
             get_thumb_strip,

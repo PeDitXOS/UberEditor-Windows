@@ -16,6 +16,8 @@ const FP: i64 = 1 << 16;
 
 struct Shared {
     playing: AtomicBool,
+    /// Velocidad de shuttle en punto fijo <<16 (negativa = reversa).
+    rate_fp: AtomicI64,
     pos_fp: AtomicI64,
     items: Mutex<Arc<Vec<MixItem>>>,
     items_version: AtomicU64,
@@ -34,6 +36,7 @@ impl Player {
     pub fn new() -> AudioResult<Player> {
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
+            rate_fp: AtomicI64::new(1 << 16),
             pos_fp: AtomicI64::new(0),
             items: Mutex::new(Arc::new(vec![])),
             items_version: AtomicU64::new(0),
@@ -75,7 +78,18 @@ impl Player {
 
     pub fn play(&self, from_us: i64) {
         self.shared.pos_fp.store(us_to_frames(from_us) * FP, Ordering::SeqCst);
+        self.shared.rate_fp.store(1 << 16, Ordering::SeqCst);
         self.shared.playing.store(true, Ordering::SeqCst);
+    }
+
+    /// Velocidad de shuttle JKL (±0.25..±8). El pitch cambia (sin WSOLA aún).
+    pub fn set_rate(&self, rate: f64) {
+        let clamped = rate.clamp(-8.0, 8.0);
+        self.shared.rate_fp.store((clamped * FP as f64) as i64, Ordering::SeqCst);
+    }
+
+    pub fn rate(&self) -> f64 {
+        self.shared.rate_fp.load(Ordering::SeqCst) as f64 / FP as f64
     }
 
     pub fn pause(&self) -> i64 {
@@ -135,6 +149,7 @@ fn build_stream(shared: Arc<Shared>) -> AudioResult<(cpal::Stream, u32)> {
                     return;
                 }
                 let items = shared.items.lock().unwrap().clone();
+                let rate_fp = shared.rate_fp.load(Ordering::Relaxed);
                 let mut fp = shared.pos_fp.load(Ordering::Relaxed);
                 let (mut sq_l, mut sq_r, mut n) = (0.0f64, 0.0f64, 0u32);
                 for frame in out.chunks_mut(channels) {
@@ -152,7 +167,7 @@ fn build_stream(shared: Arc<Shared>) -> AudioResult<(cpal::Stream, u32)> {
                             }
                         }
                     }
-                    fp += step_fp;
+                    fp = (fp + step_fp * rate_fp / FP).max(0);
                 }
                 shared.pos_fp.store(fp, Ordering::Relaxed);
                 if n > 0 {

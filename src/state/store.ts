@@ -40,6 +40,9 @@ export interface UiState {
   seek: (us: TimeUs) => void;
   select: (ids: Id[], additive?: boolean) => void;
   togglePlay: () => void;
+  /** Velocidad de shuttle JKL actual (1 = normal, negativa = reversa). */
+  shuttleRate: number;
+  shuttle: (direction: -1 | 0 | 1) => void;
   setView: (viewStartUs: TimeUs, pxPerSec: number) => void;
   splitAtPlayhead: () => Promise<void>;
   deleteSelection: (ripple: boolean) => Promise<void>;
@@ -101,6 +104,10 @@ export interface UiState {
     mode: "phrase" | "word" | "karaoke",
   ) => Promise<void>;
   toggleTrack: (trackId: Id, prop: "muted" | "solo" | "locked") => Promise<void>;
+  addTrack: (kind: "video" | "audio") => Promise<void>;
+  removeTrack: (trackId: Id) => Promise<void>;
+  renameTrack: (trackId: Id, name: string) => Promise<void>;
+  setTrackVolume: (trackId: Id, db: number) => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
 }
@@ -220,6 +227,29 @@ export const useStore = create<UiState>((set, get) => {
     select: (ids, additive = false) =>
       set((s) => ({ selection: additive ? [...new Set([...s.selection, ...ids])] : ids })),
 
+    shuttleRate: 1,
+    shuttle: (direction) => {
+      const s = get();
+      if (direction === 0) {
+        set({ shuttleRate: 1 });
+        if (s.playing) s.togglePlay();
+        return;
+      }
+      // repetir la tecla duplica la velocidad: 1→2→4→8 (o arranca en 1)
+      const prev = s.playing ? s.shuttleRate : 0;
+      const sameDir = Math.sign(prev) === direction;
+      const next = sameDir ? Math.min(Math.abs(prev) * 2, 8) * direction : direction;
+      if (engine.kind !== "tauri") {
+        set({ shuttleRate: next, playing: true, engineClock: false });
+        return;
+      }
+      engine
+        .playbackSetRate(next, s.playheadUs)
+        .then(() => set({ shuttleRate: next, playing: true, engineClock: true }))
+        .catch(() => {
+          set({ shuttleRate: next, playing: true, engineClock: false });
+        });
+    },
     togglePlay: () => {
       const s = get();
       if (engine.kind !== "tauri") {
@@ -227,6 +257,7 @@ export const useStore = create<UiState>((set, get) => {
         return;
       }
       if (!s.playing) {
+        set({ shuttleRate: 1 });
         engine
           .playbackPlay(s.playheadUs)
           .then(() => set({ playing: true, engineClock: true }))
@@ -470,6 +501,12 @@ export const useStore = create<UiState>((set, get) => {
       if (!track) return;
       await run("Pista", () => engine.setTrackProp(trackId, prop, !track[prop]));
     },
+    addTrack: (kind) => run("Añadir pista", () => engine.addTrack(kind)),
+    removeTrack: (trackId) => run("Eliminar pista", () => engine.removeTrack(trackId)),
+    renameTrack: (trackId, name) =>
+      run("Renombrar pista", () => engine.renameTrack(trackId, name)),
+    setTrackVolume: (trackId, db) =>
+      run("Volumen de pista", () => engine.setTrackVolume(trackId, db)),
 
     saveProject: async () => {
       try {
