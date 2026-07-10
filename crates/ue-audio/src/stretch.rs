@@ -35,6 +35,8 @@ pub struct Wsola {
     tail: Vec<(f32, f32)>,
     ready: VecDeque<(f32, f32)>,
     window: Vec<f32>,
+    /// Last sample served (device rate conversion may ask for a frame twice).
+    last: (f32, f32),
 }
 
 impl Wsola {
@@ -53,6 +55,7 @@ impl Wsola {
             tail: vec![(0.0, 0.0); HOP],
             ready: VecDeque::with_capacity(HOP * 2),
             window,
+            last: (0.0, 0.0),
         };
         w.reset(0);
         w
@@ -119,16 +122,36 @@ impl Wsola {
         self.nominal += HOP as f64 * self.speed;
     }
 
-    /// Pitch-preserved sample for clip-relative OUTPUT frame `rel`.
-    /// Sequential: any jump in `rel` resets the stretcher (seek).
-    pub fn frame_at(&mut self, wav: &WavMap, src_in: i64, rel: i64) -> (f32, f32) {
-        if rel != self.next_out {
-            self.reset(rel);
-        }
+    #[inline]
+    fn pull(&mut self, wav: &WavMap, src_in: i64) -> (f32, f32) {
         while self.ready.is_empty() {
             self.generate(wav, src_in);
         }
-        self.next_out += 1;
         self.ready.pop_front().unwrap_or((0.0, 0.0))
+    }
+
+    /// Pitch-preserved sample for clip-relative OUTPUT frame `rel`.
+    ///
+    /// The device rate conversion is NOT perfectly sequential: a 44.1 kHz
+    /// output asks for the occasional +2 skip, a 96 kHz one repeats frames.
+    /// Tolerate both (repeat → serve the last sample again; small skip →
+    /// advance); only a real jump (seek) resets the stretcher.
+    pub fn frame_at(&mut self, wav: &WavMap, src_in: i64, rel: i64) -> (f32, f32) {
+        if rel + 1 == self.next_out {
+            return self.last; // repeated frame
+        }
+        if rel != self.next_out {
+            let ahead = rel - self.next_out;
+            if (1..=4096).contains(&ahead) {
+                for _ in 0..ahead {
+                    let _ = self.pull(wav, src_in);
+                }
+            } else {
+                self.reset(rel);
+            }
+        }
+        self.last = self.pull(wav, src_in);
+        self.next_out = rel + 1;
+        self.last
     }
 }

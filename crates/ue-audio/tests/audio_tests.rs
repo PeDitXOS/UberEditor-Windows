@@ -468,3 +468,34 @@ fn wsola_output_is_continuous() {
     // a 330 Hz sine at full scale moves ≤ ~0.045/sample; allow overlap slack
     assert!(max_jump < 0.09, "no clicks: max jump {max_jump}");
 }
+
+/// Device rate conversion access patterns (44.1 kHz skips, 96 kHz repeats)
+/// must NOT silence the stretcher (regression: it reset on every skip).
+#[test]
+fn wsola_survives_device_rate_conversion_patterns() {
+    use ue_audio::stretch::Wsola;
+    let sr = RATE as f64;
+    let frames = 4 * RATE as i64;
+    let path = write_wav("sine440.wav", frames, |i| {
+        let v = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr).sin();
+        (((v * 20000.0) as i16), ((v * 20000.0) as i16))
+    });
+    let wav = WavMap::open(&path).unwrap();
+
+    for step in [48000.0 / 44100.0, 0.5] {
+        let mut st = Wsola::new(1.5);
+        let n = RATE / 2;
+        let mut sq = 0.0f64;
+        let mut count = 0u32;
+        for i in 0..n {
+            let rel = (i as f64 * step) as i64;
+            let (l, _r) = st.frame_at(&wav, 0, rel);
+            if i > 4096 {
+                sq += (l as f64) * (l as f64);
+                count += 1;
+            }
+        }
+        let rms = (sq / count as f64).sqrt();
+        assert!(rms > 0.2, "audible output with step {step}: RMS {rms}");
+    }
+}

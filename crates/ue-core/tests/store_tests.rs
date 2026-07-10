@@ -604,3 +604,21 @@ fn split_ranges_segments_without_removing() {
     let seq = store.project.sequence(seq_id).unwrap();
     assert!(seq.tracks.iter().filter(|t| t.id == vtrack || t.id == atrack).all(|t| t.clips.len() == 1));
 }
+
+/// Slowing a clip down next to another clamps its duration to the gap
+/// instead of failing with a collision error.
+#[test]
+fn set_clip_speed_clamps_to_next_clip() {
+    let (mut store, _seq, vtrack, _at, va, _aa) = fixture();
+    let a = store
+        .insert_clip(vtrack, Clip::new_media(va, 0, 4 * SEC, 0), InsertMode::Strict)
+        .unwrap();
+    store
+        .insert_clip(vtrack, Clip::new_media(va, 4 * SEC, 8 * SEC, 4 * SEC), InsertMode::Strict)
+        .unwrap();
+    // 0.5x would need 8 s but only 4 s fit before the next clip
+    store.set_clip_speed(a, 0.5).unwrap();
+    let clip = store.project.clip(a).unwrap();
+    assert!((clip.speed - 0.5).abs() < 1e-9);
+    assert_eq!(clip.duration, 4 * SEC, "clamped to the gap");
+}

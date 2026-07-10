@@ -513,8 +513,22 @@ pub fn set_clip_speed(project: &Project, clip_id: Id, speed: f64) -> UeResult<Ve
         return Err(UeError::Invalid("only media clips have speed".into()));
     };
     let src_len = src_out - src_in;
-    let duration = quantize_to_frame(((src_len as f64) / speed).round() as TimeUs, seq.fps)
+    let mut duration = quantize_to_frame(((src_len as f64) / speed).round() as TimeUs, seq.fps)
         .max(frame_duration_us(seq.fps));
+    // slowing down makes the clip longer: instead of failing on the next
+    // clip, clamp the duration to the available gap (out point trims early)
+    if let Some(next_start) = seq.tracks[ti]
+        .clips
+        .iter()
+        .filter(|c| c.start > clip.start)
+        .map(|c| c.start)
+        .min()
+    {
+        let gap = next_start - clip.start;
+        if duration > gap {
+            duration = quantize_to_frame(gap, seq.fps).max(frame_duration_us(seq.fps));
+        }
+    }
     let mut plan = Planner::new(project);
     plan.do_(Action::SetClipSpeed { clip_id, speed, duration })?;
     Ok(plan.finish())
