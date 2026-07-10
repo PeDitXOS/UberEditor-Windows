@@ -36,6 +36,94 @@ pub struct AppState {
     /// Timeline visual caches (per asset).
     pub peaks_cache: Mutex<std::collections::HashMap<Id, Arc<Vec<f32>>>>,
     pub thumbs_cache: Mutex<std::collections::HashMap<Id, ue_media::thumbs::ThumbStrip>>,
+    /// Background jobs for slow MCP tools (transcribe/export/avatar): an agent
+    /// gets a job id immediately and polls, so the client never times out on a
+    /// blocking call. Keyed by job id, newest kept.
+    pub jobs: Mutex<std::collections::HashMap<String, Job>>,
+}
+
+/// State of one long-running background job.
+#[derive(Clone, Debug)]
+pub struct Job {
+    pub id: String,
+    /// "transcribe" | "export" | "avatar".
+    pub kind: String,
+    /// "running" | "done" | "error".
+    pub status: String,
+    /// 0..1 (best effort; not every job reports fine-grained progress).
+    pub progress: f64,
+    pub message: String,
+    /// The tool result once `status == "done"`.
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+impl Job {
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "job_id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "progress": self.progress,
+            "message": self.message,
+            "result": self.result,
+            "error": self.error,
+        })
+    }
+}
+
+/// Registers a new running job and returns its id (a fresh ULID).
+pub fn job_start(state: &AppState, kind: &str, message: &str) -> String {
+    let id = Id::new().to_string();
+    let job = Job {
+        id: id.clone(),
+        kind: kind.to_string(),
+        status: "running".into(),
+        progress: 0.0,
+        message: message.to_string(),
+        result: None,
+        error: None,
+    };
+    let mut jobs = state.jobs.lock().unwrap();
+    // keep the map from growing without bound across a long session
+    if jobs.len() > 64 {
+        let done: Vec<String> =
+            jobs.values().filter(|j| j.status != "running").map(|j| j.id.clone()).collect();
+        for k in done {
+            jobs.remove(&k);
+        }
+    }
+    jobs.insert(id.clone(), job);
+    id
+}
+
+/// Updates a job's progress/message (no-op if it's gone).
+pub fn job_progress(state: &AppState, id: &str, progress: f64, message: &str) {
+    if let Some(j) = state.jobs.lock().unwrap().get_mut(id) {
+        j.progress = progress.clamp(0.0, 1.0);
+        if !message.is_empty() {
+            j.message = message.to_string();
+        }
+    }
+}
+
+/// Marks a job finished (done with a result, or error).
+pub fn job_finish(state: &AppState, id: &str, result: Result<serde_json::Value, String>) {
+    if let Some(j) = state.jobs.lock().unwrap().get_mut(id) {
+        match result {
+            Ok(v) => {
+                j.status = "done".into();
+                j.progress = 1.0;
+                j.result = Some(v);
+                j.message = "done".into();
+            }
+            Err(e) => {
+                j.status = "error".into();
+                j.message = e.clone();
+                j.error = Some(e);
+            }
+        }
+    }
 }
 
 impl AppState {
@@ -57,6 +145,7 @@ impl AppState {
             models_dir: Mutex::new(None),
             peaks_cache: Mutex::new(std::collections::HashMap::new()),
             thumbs_cache: Mutex::new(std::collections::HashMap::new()),
+            jobs: Mutex::new(std::collections::HashMap::new()),
         }
     }
 }

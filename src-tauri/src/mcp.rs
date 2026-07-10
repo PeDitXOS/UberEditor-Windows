@@ -232,8 +232,10 @@ fn tool_defs() -> Value {
             "transcribe_asset",
             "Transcribes an asset's audio with Whisper, word by word, and stores \
              the transcript on the project. Required by add_subtitles_clip, \
-             replace_words and generate_avatar_video. BLOCKS until done (minutes \
-             for a long file) and downloads the ggml model on first use. \
+             replace_words and generate_avatar_video. RUNS IN THE BACKGROUND: \
+             returns a `job_id` immediately (transcription takes minutes and \
+             downloads the ggml model on first use); poll get_job_status until \
+             it's done — the `result` then has {transcript_id, words}. \
              Re-transcribing replaces the previous transcript. Not undoable.",
             json!({
                 "asset_id": str_("asset id; must have audio and a ready conform"),
@@ -682,7 +684,9 @@ fn tool_defs() -> Value {
              the avatar shakes with the speaker's volume. The result is imported \
              into the media pool; put it on the timeline with add_clip. \
              The driver's VIDEO is irrelevant — only its transcript and audio. \
-             BLOCKS for minutes. Not undoable (it adds an asset).",
+             RUNS IN THE BACKGROUND: returns a `job_id` immediately (minutes of \
+             work); poll get_job_status until done — the `result` then has \
+             {asset_id}. Not undoable (it adds an asset).",
             json!({
                 "config_id": str_("avatar setup id (get_catalog → avatar_setups)"),
                 "driver_asset": str_("asset id of the VOICE; must be transcribed"),
@@ -727,10 +731,13 @@ fn tool_defs() -> Value {
         // -------------------------------------------------------------- render
         tool(
             "export_video",
-            "Renders the active sequence to a file with ffmpeg and returns the \
-             path. BLOCKS until finished. Pass `ranges` to render several chunks \
-             of the timeline concatenated, in order, into ONE file (the 'pieces' \
-             feature); omit it to render everything.",
+            "Renders the active sequence to a file with ffmpeg. RUNS IN THE \
+             BACKGROUND: returns a `job_id` immediately (a real export takes tens \
+             of seconds to minutes); poll get_job_status until done — the \
+             `result` then has {path, pieces}. Snapshots the timeline at call \
+             time, so later edits don't affect this render. Pass `ranges` to \
+             render several chunks concatenated, in order, into ONE file (the \
+             'pieces' feature); omit it to render everything.",
             json!({
                 "path": str_("absolute output path; the extension should match `format`"),
                 "ranges": {
@@ -780,6 +787,26 @@ fn tool_defs() -> Value {
             &["action"], Kind::Edit,
         ),
 
+        // -------------------------------------------------------------- jobs
+        tool(
+            "get_job_status",
+            "Poll a background job started by transcribe_asset, export_video or \
+             generate_avatar_video. Returns {status: running|done|error, \
+             progress: 0..1, message, result?, error?}. Those tools return a \
+             `job_id` immediately (they can run for minutes) — keep calling this \
+             until status is 'done' (the tool's real result is in `result`) or \
+             'error'. A client-side timeout on the launching call is NOT a \
+             failure; the job keeps running here, so poll instead of re-running.",
+            json!({ "job_id": str_("the id returned by the launching tool") }),
+            &["job_id"], Kind::Read,
+        ),
+        tool(
+            "list_jobs",
+            "All background jobs this session (running and finished), newest \
+             first: their kind, status, progress and message.",
+            json!({}), &[], Kind::Read,
+        ),
+
         // ------------------------------------------------------------- history
         tool(
             "undo",
@@ -825,6 +852,54 @@ fn finish(r: Result<Value, String>) -> Value {
         Ok(v) => text_result(v),
         Err(e) => tool_error(&e),
     }
+}
+
+/// Runs `work` as a background job and returns `{job_id, status, …}` so the
+/// launching call never blocks the client into a timeout. With a real app the
+/// job runs on its own thread and the agent polls get_job_status; in tests
+/// (no app) it runs inline and comes back already `done`, so the SAME polling
+/// path is exercised. `work(state, job_id)` may report progress via
+/// `crate::job_progress` and returns the tool's real result.
+fn run_async(
+    state: &AppState,
+    app: Option<&tauri::AppHandle>,
+    kind: &str,
+    message: &str,
+    work: impl FnOnce(&AppState, &str) -> Result<Value, String> + Send + 'static,
+) -> Value {
+    let job_id = crate::job_start(state, kind, message);
+    match app {
+        Some(app) => {
+            let app = app.clone();
+            let jid = job_id.clone();
+            std::thread::spawn(move || {
+                use tauri::Manager;
+                let state = app.state::<AppState>();
+                let r = work(&state, &jid);
+                let ok = r.is_ok();
+                crate::job_finish(&state, &jid, r);
+                if ok {
+                    use tauri::Emitter;
+                    let _ = app.emit("state-changed", ());
+                }
+            });
+        }
+        None => {
+            let r = work(state, &job_id);
+            crate::job_finish(state, &job_id, r);
+        }
+    }
+    let mut snap = state
+        .jobs
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .map(|j| j.to_value())
+        .unwrap_or_else(|| json!({ "job_id": job_id }));
+    if let Some(obj) = snap.as_object_mut() {
+        obj.insert("poll_with".into(), json!("get_job_status"));
+    }
+    text_result(snap)
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,12 +1075,17 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
                 .collect();
             Ok(json!({ "imported": assets.len(), "assets": assets }))
         })()),
-        "transcribe_asset" => finish((|| {
+        "transcribe_asset" => match (|| {
             let asset_id = args.id("asset_id")?;
             let model = args.get("model").and_then(|v| v.as_str()).map(str::to_string);
-            let (transcript_id, words) = crate::transcribe_blocking(state, asset_id, model)?;
-            Ok(json!({ "transcript_id": transcript_id.to_string(), "words": words }))
-        })()),
+            Ok::<_, String>((asset_id, model))
+        })() {
+            Err(e) => tool_error(&e),
+            Ok((asset_id, model)) => run_async(state, app, "transcribe", "transcribing…", move |s, _| {
+                let (transcript_id, words) = crate::transcribe_blocking(s, asset_id, model)?;
+                Ok(json!({ "transcript_id": transcript_id.to_string(), "words": words }))
+            }),
+        },
         "relink_asset" => finish((|| {
             let asset_id = args.id("asset_id")?;
             let new_path = args.str("new_path")?.to_string();
@@ -1256,15 +1336,23 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
             let path = crate::export_avatar_config_impl(state, config_id, args.str("path")?)?;
             Ok(json!({ "path": path }))
         })()),
-        "generate_avatar_video" => finish((|| {
-            let config_id = args.id("config_id")?;
-            let driver_asset = args.id("driver_asset")?;
-            let asset_id =
-                crate::avatar_generate_blocking(state, config_id, driver_asset, &|stage, p, msg| {
-                    ue_core::dlog("mcp:avatar", &format!("{stage} {p:.0} {msg}"));
-                })?;
-            Ok(json!({ "asset_id": asset_id.to_string() }))
-        })()),
+        "generate_avatar_video" => match (|| {
+            Ok::<_, String>((args.id("config_id")?, args.id("driver_asset")?))
+        })() {
+            Err(e) => tool_error(&e),
+            Ok((config_id, driver_asset)) => {
+                run_async(state, app, "avatar", "generating avatar…", move |s, jid| {
+                    let jid = jid.to_string();
+                    let asset_id = crate::avatar_generate_blocking(
+                        s,
+                        config_id,
+                        driver_asset,
+                        &|_stage, p, msg| crate::job_progress(s, &jid, p, &msg),
+                    )?;
+                    Ok(json!({ "asset_id": asset_id.to_string() }))
+                })
+            }
+        },
         "reload_effect_packs" => {
             let errors = crate::reload_packs(state);
             text_result(json!({
@@ -1292,7 +1380,12 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
         ),
 
         // -------------------------------------------------------------- render
-        "export_video" => finish(export_video(state, &args)),
+        "export_video" => match export_plan(state, &args) {
+            Err(e) => tool_error(&e),
+            Ok(plan) => run_async(state, app, "export", "rendering…", move |s, jid| {
+                plan.run(s, jid)
+            }),
+        },
         "debug_render_frame" => {
             let t_us = args.i64_or("t_us", 0);
             let max_width = args.i64_or("max_width", 1280).clamp(64, 1600) as u32;
@@ -1319,6 +1412,25 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
             }
         }
         "playback" => finish(playback(state, app, &args)),
+
+        // ---------------------------------------------------------------- jobs
+        "get_job_status" => finish((|| {
+            let id = args.str("job_id")?;
+            state
+                .jobs
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|j| j.to_value())
+                .ok_or_else(|| format!("no job '{id}' (it may have been evicted; jobs are session-scoped)"))
+        })()),
+        "list_jobs" => {
+            let mut jobs: Vec<Value> =
+                state.jobs.lock().unwrap().values().map(|j| j.to_value()).collect();
+            // newest first (ULID ids sort by time)
+            jobs.sort_by(|a, b| b["job_id"].as_str().cmp(&a["job_id"].as_str()));
+            text_result(json!({ "jobs": jobs }))
+        }
 
         // ------------------------------------------------------------- history
         "undo" => finish(
@@ -1933,8 +2045,39 @@ fn replace_words(state: &AppState, args: &Args) -> Result<Value, String> {
     Ok(json!({ "replaced": n }))
 }
 
-fn export_video(state: &AppState, args: &Args) -> Result<Value, String> {
-    let path = args.str("path")?;
+/// A fully-resolved export request: the timeline snapshot + settings + output.
+/// Built synchronously (so bad args fail fast) then run on a job thread.
+struct ExportPlan {
+    project: ue_core::model::Project,
+    seq_id: Id,
+    base_dir: std::path::PathBuf,
+    path: String,
+    settings: ue_export::ExportSettings,
+}
+
+impl ExportPlan {
+    fn run(self, state: &AppState, job_id: &str) -> Result<Value, String> {
+        let cancel = state.export_cancel.clone();
+        cancel.store(false, Ordering::SeqCst);
+        let pieces = self.settings.ranges.len();
+        // the progress closure runs synchronously inside this call, so it can
+        // borrow state/job_id directly (no escape)
+        ue_export::export_sequence_with_progress(
+            &self.project,
+            self.seq_id,
+            &self.base_dir,
+            std::path::Path::new(&self.path),
+            &self.settings,
+            |p| crate::job_progress(state, job_id, p as f64, ""),
+            &cancel,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(json!({ "path": self.path, "pieces": pieces }))
+    }
+}
+
+fn export_plan(state: &AppState, args: &Args) -> Result<ExportPlan, String> {
+    let path = args.str("path")?.to_string();
     let format = match args.get("format").and_then(|v| v.as_str()) {
         None | Some("mp4") => ue_export::ExportFormat::Mp4,
         Some("m4a") => ue_export::ExportFormat::M4a,
@@ -1955,31 +2098,21 @@ fn export_video(state: &AppState, args: &Args) -> Result<Value, String> {
         extra_packs: state.user_packs.lock().unwrap().clone(),
         ..defaults
     };
-    let (project, seq_id, base_dir) = {
-        let store = state.store.lock().unwrap();
-        let base = state
-            .path
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        (store.project.clone(), store.project.active_sequence, base)
-    };
-    let cancel = state.export_cancel.clone();
-    cancel.store(false, Ordering::SeqCst);
-    let pieces = settings.ranges.len();
-    ue_export::export_sequence_with_progress(
-        &project,
-        seq_id,
-        &base_dir,
-        std::path::Path::new(path),
-        &settings,
-        |_| {},
-        &cancel,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(json!({ "path": path, "pieces": pieces }))
+    let store = state.store.lock().unwrap();
+    let base_dir = state
+        .path
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    Ok(ExportPlan {
+        project: store.project.clone(),
+        seq_id: store.project.active_sequence,
+        base_dir,
+        path,
+        settings,
+    })
 }
 
 /// The player is created lazily on the first `play`, so pause/seek/position
@@ -2084,6 +2217,8 @@ fn is_mutation(name: &str) -> bool {
             | "get_transcript"
             | "find_words"
             | "get_catalog"
+            | "get_job_status"
+            | "list_jobs"
             | "debug_render_frame"
             | "debug_playback_frame"
     )

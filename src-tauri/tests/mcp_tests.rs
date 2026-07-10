@@ -141,10 +141,10 @@ fn tools_cover_the_whole_editor_and_are_documented() {
         "remove_silences", "replace_words", "set_word_text",
         "save_avatar_config", "remove_avatar_config",
         "import_avatar_config", "export_avatar_config", "generate_avatar_video",
-        // project / render / history
+        // project / render / history / jobs
         "new_project", "open_project", "save_project", "reload_effect_packs",
         "export_video", "debug_render_frame", "debug_playback_frame", "playback",
-        "undo", "redo",
+        "get_job_status", "list_jobs", "undo", "redo",
     ] {
         assert!(names.contains(&expected), "missing MCP tool: {expected}");
     }
@@ -458,6 +458,15 @@ fn agentic_workflow_import_edit_export() {
         );
         tool_json(&resp)
     };
+    // launch an async tool (export/transcribe/avatar) and poll to completion.
+    // In tests the job finishes inline, so a single poll returns the result.
+    let run_job = |name: &str, arguments: Value| -> Value {
+        let launched = call(name, arguments);
+        let job_id = launched["job_id"].as_str().expect("async tool returns a job_id");
+        let status = call("get_job_status", json!({ "job_id": job_id }));
+        assert_eq!(status["status"], "done", "job failed: {status}");
+        status["result"].clone()
+    };
 
     // 1. import (no AppHandle → no background conform, which is fine here)
     let imported = call("import_media", json!({ "paths": [src.to_string_lossy()] }));
@@ -502,10 +511,10 @@ fn agentic_workflow_import_edit_export() {
         .collect();
     assert_eq!(clips.len(), 2, "split around the hole");
 
-    // 6. render it for real
+    // 6. render it for real (async job → poll)
     let out = dir.join("out.mp4");
     let _ = std::fs::remove_file(&out);
-    let exported = call("export_video", json!({ "path": out.to_string_lossy(), "crf": 30 }));
+    let exported = run_job("export_video", json!({ "path": out.to_string_lossy(), "crf": 30 }));
     assert_eq!(exported["pieces"], 0, "whole timeline");
     assert!(out.exists(), "the export wrote a file");
     let probed = ue_media::import_file(&out).expect("the export is a valid video");
@@ -518,7 +527,7 @@ fn agentic_workflow_import_edit_export() {
     // 7. multi-piece export: two chunks concatenated into one file
     let pieces = dir.join("pieces.mp4");
     let _ = std::fs::remove_file(&pieces);
-    let exported = call(
+    let exported = run_job(
         "export_video",
         json!({ "path": pieces.to_string_lossy(), "crf": 30,
                 "ranges": [[0, SEC], [3 * SEC, 4 * SEC]] }),
@@ -1365,7 +1374,7 @@ fn tool_count_matches_the_docs() {
     let state = AppState::new_default();
     let tools = rpc(&state, "tools/list", json!({}));
     let n = tools.pointer("/result/tools").unwrap().as_array().unwrap().len();
-    assert_eq!(n, 49, "README/docs/MCP.md advertise the tool count; update them");
+    assert_eq!(n, 51, "README/docs/MCP.md advertise the tool count; update them");
 }
 
 /// GOLDEN RULE: the paused preview must show subtitles, exactly like the
@@ -1585,4 +1594,50 @@ fn clip_labels_and_naming() {
     assert_eq!(name(&timeline()), "x.mp4");
     rpc(&state, "tools/call", json!({ "name": "undo", "arguments": {} }));
     assert_eq!(name(&timeline()), "intro hook", "undo restores the name");
+}
+
+/// export_video returns a job_id immediately and finishes via get_job_status.
+/// A client-side timeout on the launching call is therefore never a failure —
+/// the point of this whole mechanism (field bug: agents re-ran on timeout).
+#[test]
+fn export_runs_as_a_pollable_job() {
+    use std::process::Command;
+    let ffmpeg = ue_media::ffmpeg_bin();
+    if Command::new(&ffmpeg).arg("-version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("NOTE: no ffmpeg; test skipped");
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-job-export");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("clip.mp4");
+    if !src.exists() {
+        Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=15"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .arg(&src).status().unwrap();
+    }
+    let state = AppState::new_default();
+    let call = |name: &str, a: Value| tool_json(&rpc(&state, "tools/call", json!({ "name": name, "arguments": a })));
+    let asset = call("import_media", json!({ "paths": [src.to_string_lossy()] }));
+    let asset_id = asset["assets"][0]["asset_id"].as_str().unwrap().to_string();
+    call("add_clip", json!({ "asset_id": asset_id }));
+
+    // launch: comes back immediately with a job_id and a poll hint
+    let out = dir.join("out.mp4");
+    let launched = call("export_video", json!({ "path": out.to_string_lossy(), "crf": 32 }));
+    let job_id = launched["job_id"].as_str().expect("job_id").to_string();
+    assert_eq!(launched["poll_with"], "get_job_status");
+
+    // poll: done, and the real result carries the path
+    let status = call("get_job_status", json!({ "job_id": job_id }));
+    assert_eq!(status["status"], "done", "{status}");
+    assert_eq!(status["kind"], "export");
+    assert_eq!(status["result"]["path"], out.to_string_lossy().as_ref());
+    assert!(out.exists(), "the export wrote a file");
+
+    // list_jobs sees it; an unknown id errors (not a silent empty)
+    let jobs = call("list_jobs", json!({}));
+    assert!(jobs["jobs"].as_array().unwrap().iter().any(|j| j["job_id"] == job_id));
+    let missing = rpc(&state, "tools/call", json!({ "name": "get_job_status", "arguments": { "job_id": "nope" } }));
+    assert_eq!(missing.pointer("/result/isError").unwrap(), true);
 }
