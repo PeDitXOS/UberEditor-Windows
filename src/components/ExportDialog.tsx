@@ -44,6 +44,7 @@ export function ExportDialog() {
   const exportRanges = useStore((s) => s.exportRanges);
   const removeExportRange = useStore((s) => s.removeExportRange);
   const clearExportRanges = useStore((s) => s.clearExportRanges);
+  const addExportRange = useStore((s) => s.addExportRange);
 
   const [presetIdx, setPresetIdx] = useState(0);
   const [maxHeight, setMaxHeight] = useState<number | null>(1080);
@@ -235,7 +236,27 @@ export function ExportDialog() {
               />
               Pieces ({exportRanges.length})
             </label>
+            {hasRange && (
+              <button
+                className="focus-ring ml-auto rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-dim hover:text-ink"
+                onClick={() => {
+                  addExportRange();
+                  setScope("pieces");
+                }}
+                title="Add the current I–O range to the pieces list"
+              >
+                + Add this range
+              </button>
+            )}
           </div>
+
+          {!hasPieces && (
+            <p className="ml-24 text-[10.5px] leading-relaxed text-ink-faint">
+              <b>Pieces</b> render several chunks of the timeline into ONE file, in order. Mark a
+              range with <kbd>I</kbd>/<kbd>O</kbd> and press <kbd>P</kbd> (or “+ Add this range”)
+              for each chunk you want.
+            </p>
+          )}
 
           {hasPieces && (
             <div className="ml-24 rounded-md border border-line-soft bg-bg2/40 p-1.5">

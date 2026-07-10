@@ -158,16 +158,20 @@ function drawRuler(
     const x0 = usToX(a);
     const x1 = usToX(b);
     if (x1 < -10 || x0 > w + 10) return;
-    ctx.fillStyle = "rgba(70, 167, 88, 0.22)";
-    ctx.fillRect(x0, 0, Math.max(2, x1 - x0), RULER_H - 1);
+    const bw = Math.max(3, x1 - x0);
+    // solid band at the top of the ruler so saved pieces are unmissable
+    ctx.fillStyle = "rgba(70, 167, 88, 0.30)";
+    ctx.fillRect(x0, 0, bw, RULER_H - 1);
     ctx.fillStyle = "#46a758";
+    ctx.fillRect(x0, 0, bw, 4);
     ctx.fillRect(x0, 0, 2, RULER_H - 1);
     ctx.fillRect(x1 - 2, 0, 2, RULER_H - 1);
-    if (x1 - x0 > 18) {
-      ctx.font = '600 9px "JetBrains Mono", monospace';
-      ctx.textAlign = "left";
+    if (bw > 22) {
+      ctx.fillStyle = "#0a0908";
+      ctx.font = '700 9px "JetBrains Mono", monospace';
+      ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.fillText(`${i + 1}`, x0 + 4, 2);
+      ctx.fillText(`${i + 1}`, x0 + bw / 2, -1);
     }
   });
 
@@ -1006,9 +1010,17 @@ export function Timeline() {
           📱 Vertical
         </button>
         <button
-          className="focus-ring rounded-md px-2 py-1 text-[11.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
+          className={`focus-ring rounded-md px-2 py-1 text-[11.5px] ${
+            rangeInUs != null && rangeOutUs != null && rangeOutUs > rangeInUs
+              ? "text-clip-audio-hi hover:bg-bg3"
+              : "text-ink-dim hover:bg-bg3 hover:text-ink"
+          }`}
           onClick={() => addExportRange()}
-          title="Save the I–O range as an export piece (P) — several pieces render concatenated"
+          title={
+            rangeInUs != null && rangeOutUs != null && rangeOutUs > rangeInUs
+              ? "Save this I–O range as an export piece (P). Export → Scope: Pieces renders them concatenated."
+              : "Mark a range first with I (in) and O (out), then press P to save it as an export piece"
+          }
         >
           + Piece{exportRanges.length > 0 ? ` (${exportRanges.length})` : ""}
         </button>

@@ -151,7 +151,16 @@ const rangeRadio = page.locator("label", { hasText: "Range I–O" }).locator('in
 if (await rangeRadio.isDisabled())
   throw new Error("the I–O range marked with keys did not reach the dialog (radio disabled)");
 await rangeRadio.check();
+// multi-range: with no pieces the dialog explains them; adding one selects Pieces
+if ((await page.getByText(/render several chunks/).count()) === 0)
+  throw new Error("the export dialog does not explain what Pieces are");
+await page.getByRole("button", { name: "+ Add this range" }).click();
+await page.waitForTimeout(200);
+const piecesRadio = page.locator("label", { hasText: "Pieces (1)" }).locator('input[type="radio"]');
+if (!(await piecesRadio.isChecked()))
+  throw new Error("adding a range from the dialog did not select the Pieces scope");
 await shot("10-export-dialog");
+await page.evaluate(() => window.__ue_store.getState().clearExportRanges());
 await page.getByRole("button", { name: "Cancel" }).click();
 
 // 11. Marquee selection: drag a rectangle over several clips
