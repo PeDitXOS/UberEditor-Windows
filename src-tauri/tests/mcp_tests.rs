@@ -648,3 +648,87 @@ fn playback_stream_with_transform_yields_continuous_frames() {
     }
     assert_eq!(frames, 24, "one second of continuous frames from ONE session");
 }
+
+/// FULL playback-path simulation with production pieces: 30 ticks at 24 fps
+/// over a real video with an active Position X transform must open EXACTLY
+/// ONE session and stream frames from it. This is the field bug: the old
+/// vf-string comparison reopened a session on every tick (his logs showed
+/// one open per ~90 ms) and playback stayed black.
+#[test]
+fn simulated_playback_opens_exactly_one_session() {
+    use std::path::PathBuf;
+    use std::process::Command;
+    let ffmpeg = ue_media::ffmpeg_bin();
+    if Command::new(&ffmpeg).arg("-version").output().map(|o| !o.status.success()).unwrap_or(true)
+    {
+        eprintln!("NOTE: no ffmpeg; test skipped");
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-playback-sim");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("clip.mp4");
+    if !src.exists() {
+        let st = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   "testsrc=duration=6:size=960x540:rate=30"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(st.success());
+    }
+
+    // the user's scenario: clip at t=0, Position X = 110, 1080p canvas
+    let mut transform = ue_core::model::Transform2D::default();
+    transform.position.0 = 110.0.into();
+    let canvas = Some((1920u32, 1080u32));
+    let reg = ue_render::core_registry();
+
+    let mut session: Option<ue_media::stream::MjpegSession> = None;
+    let mut session_key: Option<String> = None;
+    let mut opens = 0usize;
+    let mut frames = 0usize;
+
+    // 30 playback ticks, ~41.7 ms apart (the FrameService cadence)
+    for tick in 0..30i64 {
+        let t = 500_000 + tick * 41_667;
+        let resolved = ue_media::frame::ResolvedFrame {
+            asset_path: src.to_string_lossy().into_owned(),
+            src_t_us: t,
+            clip_rel_us: t,
+            speed: 1.0,
+            effects: vec![],
+            transform: transform.clone(),
+        };
+        let path = PathBuf::from(&resolved.asset_path);
+        let key = ue_tauri_lib::playback_session_key(&resolved, canvas, None);
+        let reusable = ue_tauri_lib::should_reuse_session(
+            session.as_ref().map(|s| (s.asset_path.as_path(), s.next_src_us())),
+            session_key.as_deref() == Some(key.as_str()),
+            &path,
+            resolved.src_t_us,
+        );
+        if !reusable {
+            let rel0 = resolved.clip_rel_us as f64 / 1e6;
+            let tvar = format!("(t+{rel0:.6})");
+            let vf = ue_render::clip_vf_at(&reg, &resolved.effects, &resolved.transform, canvas, &tvar);
+            session = Some(
+                ue_media::stream::MjpegSession::open(&path, resolved.src_t_us, 960, 24, vf.as_deref())
+                    .unwrap(),
+            );
+            session_key = Some(key);
+            opens += 1;
+        }
+        // consume like the loop: everything up to the current position
+        if let Some(s) = session.as_mut() {
+            while s.next_src_us() <= resolved.src_t_us {
+                match s.next_frame() {
+                    Ok(Some(_)) => frames += 1,
+                    other => panic!("stream died at tick {tick}: {other:?}"),
+                }
+            }
+        }
+    }
+    assert_eq!(opens, 1, "the reopen-per-tick storm must be gone (opens={opens})");
+    assert!(frames >= 20, "frames flowed continuously (frames={frames})");
+}

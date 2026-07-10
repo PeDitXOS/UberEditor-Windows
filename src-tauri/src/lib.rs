@@ -103,6 +103,24 @@ pub fn playback_session_key(
     )
 }
 
+/// Production session-reuse rule (also exercised by the playback tests):
+/// same file, same composition key, and the requested source time reachable
+/// by the running stream (up to 400 ms behind for shuttle-reverse, up to
+/// 1.5 s ahead to let the decoder catch up).
+pub fn should_reuse_session(
+    session: Option<(&Path, i64)>,
+    key_matches: bool,
+    path: &Path,
+    src_t: i64,
+) -> bool {
+    session.is_some_and(|(spath, next_src)| {
+        spath == path
+            && key_matches
+            && src_t >= next_src - 400_000
+            && src_t <= next_src + 1_500_000
+    })
+}
+
 fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, running: Arc<AtomicBool>) {
     let mut session: Option<MjpegSession> = None;
     // Session identity = the DATA that defines the stream, never the vf
@@ -160,14 +178,12 @@ fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, runnin
 
         // is the current session usable? (same file, same effect chain,
         // position reachable going forward)
-        let reusable = session.as_ref().is_some_and(|s| {
-            s.asset_path == path
-                && session_key.as_deref() == Some(key.as_str())
-                // going backward (shuttle J): tolerate up to 400 ms without reopening
-                // so we don't spawn one ffmpeg per tick; the frame freezes that margin
-                && src_t >= s.next_src_us() - 400_000
-                && src_t <= s.next_src_us() + 1_500_000
-        });
+        let reusable = should_reuse_session(
+            session.as_ref().map(|s| (s.asset_path.as_path(), s.next_src_us())),
+            session_key.as_deref() == Some(key.as_str()),
+            &path,
+            src_t,
+        );
         if !reusable {
             let reason = match session.as_ref() {
                 None => "no session".to_string(),
