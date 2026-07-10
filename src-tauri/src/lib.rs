@@ -1336,30 +1336,17 @@ pub fn render_frame_impl(state: &AppState, t_us: TimeUs, max_width: u32) -> Res<
     let reg = state.registry.lock().unwrap().clone();
     let canvas = project.sequence(seq_id).map(|s| s.resolution);
 
-    // FAITHFUL PATH (golden rule): composite every active video layer + the
-    // titles/subtitles the same way the export does. The avatar's live overlay
-    // still rides the old single-clip path, so keep that when an avatar clip is
-    // on screen; otherwise this is the 1:1 preview.
-    let has_active_avatar = project
-        .sequence(seq_id)
-        .map(|s| {
-            s.tracks.iter().filter(|t| !t.muted).any(|t| {
-                t.clips.iter().any(|c| {
-                    c.start <= t_us
-                        && t_us < c.end()
-                        && matches!(c.payload, ue_core::model::ClipPayload::Avatar { .. })
-                })
-            })
-        })
-        .unwrap_or(false);
-    if !has_active_avatar {
-        let packs = state.user_packs.lock().unwrap().clone();
-        match ue_export::preview::render_preview_frame(
-            &project, seq_id, &base_dir, t_us, max_width, &packs,
-        ) {
-            Ok(bytes) => return Ok(bytes.unwrap_or_default()),
-            Err(e) => dlog("frame", &format!("compositor @ {:.3}s: {e}; falling back", t_us as f64 / 1e6)),
-        }
+    // FAITHFUL PATH (golden rule): one compositor renders EVERY active layer —
+    // video clips (incl. a generated avatar, which is just normal media),
+    // reactive avatar overlays, titles and subtitles — the same way the export
+    // burns them in. Verified pixel-for-pixel against the export. The old
+    // single-clip path stays only as a fallback if the compositor errors.
+    let packs = state.user_packs.lock().unwrap().clone();
+    match ue_export::preview::render_preview_frame(
+        &project, seq_id, &base_dir, t_us, max_width, &packs,
+    ) {
+        Ok(bytes) => return Ok(bytes.unwrap_or_default()),
+        Err(e) => dlog("frame", &format!("compositor @ {:.3}s: {e}; falling back", t_us as f64 / 1e6)),
     }
 
     // animated scrub: evaluate transform AND effect curves at the clip time

@@ -277,10 +277,14 @@ instead of handing back a black frame.
 composites every active video layer (base + overlays), each clip's transform
 and effects, and the titles/subtitles — the same way the export burns them in,
 verified pixel-for-pixel (`preview_matches_export_pixel_for_pixel`). So it's a
-faithful way to check a composition without a full render. Two narrow
-exceptions: an **avatar** clip on screen falls back to the top-video-layer path
-(the live avatar overlay), and **karaoke** shows the phrase line without the
-per-word highlight.
+faithful way to check a composition without a full render.
+
+A **generated avatar is just normal media**: `generate_avatar_video` renders a
+`.mov` and imports it into the pool, so once it's on the timeline it's an
+ordinary video clip — composited 1:1 like any other. (The legacy live-reactive
+`Avatar` clip type is deprecated and not shown in the preview; use the
+generate-then-place flow.) The one remaining exception is **karaoke**, which
+shows the phrase line without the per-word highlight in preview.
 
 ---
 

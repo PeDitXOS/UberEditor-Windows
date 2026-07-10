@@ -109,12 +109,8 @@ pub fn render_preview_frame(
     }
 
     let text = text_overlays_at(project, seq, ch, cw, t_us);
-    if layers.is_empty() {
-        // nothing to show; a caller may still want the text over black, but the
-        // export would be black here too, so match it
-        if text.is_none() {
-            return Ok(None);
-        }
+    if layers.is_empty() && text.is_none() {
+        return Ok(None); // genuinely nothing on screen (export would be black too)
     }
 
     // ---- assemble the ffmpeg command ----
@@ -170,7 +166,7 @@ pub fn render_preview_frame(
             current = out;
         }
     }
-    // no video layer but we have text → text over black
+    // no video layer but we have text → over black
     if current.is_empty() {
         fc.push(format!("color=c=black:s={cw}x{ch}:d=1,format=yuv420p[c0]"));
         current = "c0".into();

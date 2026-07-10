@@ -1642,9 +1642,10 @@ fn export_runs_as_a_pollable_job() {
     assert_eq!(missing.pointer("/result/isError").unwrap(), true);
 }
 /// THE GOLDEN RULE, enforced: the paused preview must equal the export frame
-/// for frame, pixel by pixel. Builds a real multi-layer composition (red base
-/// + green PiP overlay + a subtitle), renders it BOTH ways at the same instant,
-/// and requires the sampled pixels to match within JPEG tolerance.
+/// for frame, pixel by pixel. Builds a real multi-layer composition (a red
+/// base with a green PiP overlay and a subtitle), renders it BOTH ways at the
+/// same instant, and requires the sampled pixels to match within JPEG
+/// tolerance.
 #[test]
 fn preview_matches_export_pixel_for_pixel() {
     use std::process::Command;
@@ -1739,3 +1740,4 @@ fn preview_matches_export_pixel_for_pixel() {
     // (which pixels are red/green/white) must match — a divergence would be ~255
     assert!(worst <= 40, "preview must match the export frame (worst channel Δ={worst})");
 }
+
