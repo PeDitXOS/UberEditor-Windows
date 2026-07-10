@@ -1,4 +1,147 @@
+import { useEffect, useRef, useState } from "react";
+
 import { useStore } from "../state/store";
+
+/** Copy text to the clipboard, falling back to a hidden textarea when the
+ *  async Clipboard API is unavailable (older webviews / no secure context). */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** One labelled, copyable value (the connect command, the token, the URL). */
+function CopyRow({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    if (await copyText(value)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    }
+  };
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[10.5px] font-medium uppercase tracking-wide text-ink-faint">
+          {label}
+        </span>
+        <button
+          className="focus-ring rounded px-1.5 py-0.5 text-[10.5px] text-ink-dim hover:bg-bg3 hover:text-ink"
+          onClick={() => void onCopy()}
+        >
+          {copied ? "✓ Copied" : "Copy"}
+        </button>
+      </div>
+      <div
+        className={`max-h-24 overflow-auto rounded-md border border-line bg-bg0 px-2 py-1.5 text-[11px] text-ink ${
+          mono ? "font-[var(--font-mono)]" : ""
+        } select-all break-all whitespace-pre-wrap`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function McpPill() {
+  const mcpPort = useStore((s) => s.mcpPort);
+  const mcpToken = useStore((s) => s.mcpToken);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    const onClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    // capture so it fires before inner handlers, but after this tick
+    const t = setTimeout(() => window.addEventListener("mousedown", onClick), 0);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onClick);
+      clearTimeout(t);
+    };
+  }, [open]);
+
+  const url = mcpPort ? `http://127.0.0.1:${mcpPort}/mcp` : "";
+  const command = mcpPort
+    ? `claude mcp add --transport http ubereditor ${url} --header "Authorization: Bearer ${mcpToken ?? ""}"`
+    : "";
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        className={`focus-ring flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] ${
+          open ? "border-(--color-accent) bg-bg2" : "border-line"
+        } ${mcpPort ? "text-ink hover:bg-bg2" : "text-ink-faint hover:bg-bg2"}`}
+        onClick={() => setOpen((o) => !o)}
+        title="MCP server — click for the connection details"
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${mcpPort ? "bg-clip-audio-hi" : "bg-ink-faint"}`} />
+        {mcpPort ? `MCP :${mcpPort}` : "MCP inactive"}
+        <span className="text-ink-faint">▾</span>
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-[380px] rounded-xl border border-line bg-bg1 p-3.5 shadow-2xl">
+          <div className="mb-2 flex items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${mcpPort ? "bg-clip-audio-hi" : "bg-ink-faint"}`}
+            />
+            <h3 className="font-[var(--font-display)] text-[13px] font-semibold text-ink">
+              MCP server {mcpPort ? "active" : "inactive"}
+            </h3>
+          </div>
+
+          {mcpPort ? (
+            <>
+              <p className="mb-3 text-[11px] leading-relaxed text-ink-dim">
+                An agent (Claude Code, etc.) can edit this project through the editor. The
+                server is <b>loopback-only</b> and needs the token below. Run this once to
+                connect it:
+              </p>
+              <div className="space-y-2.5">
+                <CopyRow label="Connect command" value={command} />
+                <CopyRow label="Token" value={mcpToken ?? ""} />
+                <CopyRow label="URL" value={url} />
+              </div>
+              <p className="mt-3 text-[10px] leading-relaxed text-ink-faint">
+                A new token is generated every time the app starts. Keep it private: anyone
+                with it can edit your project. 47 tools available — see <b>docs/MCP.md</b>.
+              </p>
+            </>
+          ) : (
+            <p className="text-[11px] leading-relaxed text-ink-dim">
+              The MCP server runs inside the desktop app. Launch it with{" "}
+              <span className="font-[var(--font-mono)] text-ink">npx tauri dev</span> to expose
+              it on <span className="font-[var(--font-mono)] text-ink">127.0.0.1:4599</span>.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Header() {
   const project = useStore((s) => s.project);
@@ -13,8 +156,6 @@ export function Header() {
   const openProject = useStore((s) => s.openProject);
   const newProject = useStore((s) => s.newProject);
   const exportProgress = useStore((s) => s.exportProgress);
-  const mcpPort = useStore((s) => s.mcpPort);
-  const mcpToken = useStore((s) => s.mcpToken);
   const cancelExport = useStore((s) => s.cancelExport);
 
   return (
@@ -80,21 +221,7 @@ export function Header() {
 
       <div className="mx-1 h-5 w-px bg-line" />
 
-      <span
-        className={`flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] ${
-          mcpPort ? "text-ink" : "text-ink-faint"
-        }`}
-        title={
-          mcpPort
-            ? `MCP server active:\nclaude mcp add --transport http ubereditor http://127.0.0.1:${mcpPort}/mcp --header "Authorization: Bearer ${mcpToken ?? ""}"`
-            : "The MCP server runs in the desktop app"
-        }
-      >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${mcpPort ? "bg-clip-audio-hi" : "bg-ink-faint"}`}
-        />
-        {mcpPort ? `MCP :${mcpPort}` : "MCP inactive"}
-      </span>
+      <McpPill />
 
       {exporting && (
         <button
