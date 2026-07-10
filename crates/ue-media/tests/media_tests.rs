@@ -301,7 +301,7 @@ fn denoise_wav_lowers_noise_floor() {
             .unwrap();
         assert!(st.success());
     }
-    let out = ue_media::denoise::denoise_wav(&noisy).unwrap();
+    let out = ue_media::denoise::denoise_wav(&noisy, None, false).unwrap();
     let rms_tail = |p: &Path| -> f64 {
         let o = std::process::Command::new(ue_media::ffmpeg_bin())
             .args(["-v", "error", "-ss", "2.3", "-i"])

@@ -165,6 +165,12 @@ You change the type and parameters in `Inspector → Generator`. Since they're n
 - Per-**track** volume (drag the dB in the header).
 - **RMS L/R meters** in the transport bar during playback.
 - Audio is the **master clock**: the position comes from the frames served to the device (no drift).
+- **Background noise removal** per clip (`Audio → Reduce background noise`): Facebook's DNS64
+  neural denoiser, rendered in the background — playback and export switch to the exact same
+  clean audio when ready. **Self-contained**: on first use the app provisions its own Python
+  venv under its data dir (needs a system `python3`/`python` ≥ 3.9; ~200 MB one-time download).
+  `UE_DENOISER_PYTHON` points to a custom interpreter (`off` disables); without any Python the
+  app falls back to ffmpeg's `afftdn`.
 
 ## Export
 

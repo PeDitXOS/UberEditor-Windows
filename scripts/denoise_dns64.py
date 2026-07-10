@@ -3,24 +3,59 @@
 
 Usage: python denoise_dns64.py IN.wav OUT.wav
 
-Reads any wav, denoises speech with Facebook's pretrained DNS64 model and
-writes OUT.wav at the INPUT sample rate / channel count (so the output can
-replace the input 1:1 in time). Long files are processed in overlapping
-chunks with a crossfade to bound memory.
+Reads a PCM wav (the app's conforms are 48 kHz stereo s16le), denoises
+speech with Facebook's pretrained DNS64 model and writes OUT.wav at the
+INPUT sample rate / channel count, so the output replaces the input 1:1 in
+time. Long files are processed in overlapping chunks with a crossfade to
+bound memory.
 
-Exit code 0 and a final "ok" line on success; any other output/exit code
-makes the caller fall back to the ffmpeg afftdn filter.
+WAV I/O uses the stdlib `wave` + numpy on purpose: torchaudio ≥ 2.9 dropped
+its built-in decoder (requires torchcodec), so depending on it made the
+sidecar fragile across versions. Resampling uses julius (pure torch, a
+denoiser dependency).
+
+Exit code 0 and a final "ok" line on success; anything else makes the
+caller fall back to the ffmpeg afftdn filter.
 """
 
 import sys
+import wave
 
+import numpy as np
 import torch
-import torchaudio
 from denoiser import pretrained
 from denoiser.dsp import convert_audio
+from julius import resample_frac
 
 CHUNK_S = 60.0
 OVERLAP_S = 0.5
+
+
+def read_wav(path: str) -> tuple[torch.Tensor, int]:
+    with wave.open(path, "rb") as f:
+        channels = f.getnchannels()
+        width = f.getsampwidth()
+        sr = f.getframerate()
+        raw = f.readframes(f.getnframes())
+    if width == 2:
+        x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 4:
+        x = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif width == 1:
+        x = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"unsupported sample width: {width}")
+    wav = torch.from_numpy(x.reshape(-1, channels).T.copy())
+    return wav, sr
+
+
+def write_wav(path: str, wav: torch.Tensor, sr: int) -> None:
+    data = (wav.clamp(-1.0, 1.0).numpy().T * 32767.0).astype("<i2")
+    with wave.open(path, "wb") as f:
+        f.setnchannels(wav.shape[0])
+        f.setsampwidth(2)
+        f.setframerate(sr)
+        f.writeframes(data.tobytes())
 
 
 def pick_device() -> str:
@@ -37,7 +72,7 @@ def main() -> int:
         return 2
     inp, out = sys.argv[1], sys.argv[2]
 
-    wav, sr = torchaudio.load(inp)
+    wav, sr = read_wav(inp)
     channels = wav.shape[0]
 
     device = pick_device()
@@ -77,15 +112,15 @@ def main() -> int:
             pos += chunk
 
     den = torch.cat(pieces)[None]
-    den = torchaudio.functional.resample(den, msr, sr)
+    den = resample_frac(den, msr, sr)
     if channels > 1:
         den = den.repeat(channels, 1)
     # match the input length exactly (resampling can drift by a few samples)
     target = wav.shape[-1]
     if den.shape[-1] < target:
         den = torch.nn.functional.pad(den, (0, target - den.shape[-1]))
-    den = den[:, :target].clamp(-1.0, 1.0)
-    torchaudio.save(out, den, sr, encoding="PCM_S", bits_per_sample=16)
+    den = den[:, :target]
+    write_wav(out, den, sr)
     print(f"ok device={device} sr={sr} samples={target}")
     return 0
 

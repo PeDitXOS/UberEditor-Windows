@@ -565,7 +565,19 @@ fn set_clip_audio(
             let conform = PathBuf::from(conform);
             if !ue_media::denoise::denoised_path(&conform).exists() {
                 let app = app.clone();
-                std::thread::spawn(move || match ue_media::denoise::denoise_wav(&conform) {
+                // self-contained: the app provisions its own denoiser venv
+                // under its data dir on first use (system python3 required)
+                let env_dir = state
+                    .models_dir
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|m| m.parent().map(|d| d.join("denoiser")));
+                std::thread::spawn(move || match ue_media::denoise::denoise_wav(
+                    &conform,
+                    env_dir.as_deref(),
+                    true,
+                ) {
                     Ok(_) => {
                         // bump the version so sync_player rebuilds the items
                         let state = app.state::<AppState>();
