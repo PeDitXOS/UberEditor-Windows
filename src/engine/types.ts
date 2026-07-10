@@ -363,6 +363,61 @@ export function assetTimeToTimeline(
 
 /** Text of the active subtitle of a Subtitles clip at the given time
  *  (respects the mode: full phrase or a single, larger word). */
+// Caption chunking — MUST mirror ue-export/src/graph.rs (preview = export).
+const CAPTION_GAP_US = 900_000;
+const CAPTION_MAX_DUR_US = 6_000_000;
+const CAPTION_LINGER_US = 600_000;
+
+export function captionMaxChars(canvasW: number, fontPx: number): number {
+  return Math.min(64, Math.max(12, Math.round((canvasW * 0.86) / (fontPx * 0.52))));
+}
+
+/**
+ * Builds caption phrases straight from the WORDS (Whisper's own segments can
+ * span minutes of continuous speech). New caption on: line full, pause >
+ * CAPTION_GAP_US, or duration > CAPTION_MAX_DUR_US.
+ */
+export function captionPhrases(
+  doc: TranscriptDoc,
+  maxChars: number,
+): { text: string; words: TranscriptWord[]; s: TimeUs; e: TimeUs }[] {
+  const words = doc.words.filter((w) => !w.rejected);
+  if (!words.length) {
+    return doc.segments.map((s) => ({ text: s.text, words: [], s: s.start_us, e: s.end_us }));
+  }
+  const cuts = [0];
+  let chars = words[0].text.length;
+  let chunkStart = words[0].start_us;
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i];
+    const gap = w.start_us - words[i - 1].end_us;
+    const tooLong = chars + 1 + w.text.length > maxChars;
+    const tooSlow = w.end_us - chunkStart > CAPTION_MAX_DUR_US;
+    if (tooLong || gap > CAPTION_GAP_US || tooSlow) {
+      cuts.push(i);
+      chars = w.text.length;
+      chunkStart = w.start_us;
+    } else {
+      chars += 1 + w.text.length;
+    }
+  }
+  cuts.push(words.length);
+  const out = [];
+  for (let c = 0; c < cuts.length - 1; c++) {
+    const group = words.slice(cuts[c], cuts[c + 1]);
+    const naturalEnd = group[group.length - 1].end_us + CAPTION_LINGER_US;
+    const next = words[cuts[c + 1]];
+    const e = next ? Math.min(naturalEnd, next.start_us) : naturalEnd;
+    out.push({
+      text: group.map((w) => w.text).join(" "),
+      words: group,
+      s: group[0].start_us,
+      e: Math.max(e, group[0].start_us + 1),
+    });
+  }
+  return out;
+}
+
 export function activeSubtitleText(
   project: Project,
   clip: Clip,
@@ -377,42 +432,36 @@ export function activeSubtitleText(
   const { transcript_id, style, mode } = clip.payload;
   const doc = project.transcripts.find((t) => t.id === transcript_id);
   if (!doc) return null;
+  const seq = activeSequence(project);
+  const fontPx = style.size * (seq.resolution[1] / 1080);
 
-  if (mode === "karaoke") {
-    // full phrase; each word lights up as it is spoken
-    for (const seg of doc.segments) {
-      const tlStart = assetTimeToTimeline(project, doc.asset_id, seg.start_us);
+  if (mode === "phrase" || mode === "karaoke") {
+    const phrases = captionPhrases(doc, captionMaxChars(seq.resolution[0], fontPx));
+    for (const ph of phrases) {
+      const tlStart = assetTimeToTimeline(project, doc.asset_id, ph.s);
       if (tlStart === null) continue;
       const from = Math.max(tlStart, clip.start);
-      const to = Math.min(tlStart + (seg.end_us - seg.start_us), clip.start + clip.duration);
+      const to = Math.min(tlStart + (ph.e - ph.s), clip.start + clip.duration);
       if (playheadUs < from || playheadUs >= to) continue;
-      const words = doc.words.filter(
-        (w) => !w.rejected && w.start_us >= seg.start_us && w.start_us < seg.end_us,
-      );
-      if (!words.length) break;
-      const spans = words.map((w) => {
+      if (mode === "phrase" || !ph.words.length) return { content: ph.text, style };
+      const spans = ph.words.map((w) => {
         const wTl = assetTimeToTimeline(project, doc.asset_id, w.start_us) ?? tlStart;
         return { text: w.text, active: playheadUs >= wTl };
       });
-      return { content: seg.text, style, spans };
+      return { content: ph.text, style, spans };
     }
     return null;
   }
 
-  const items =
-    mode === "phrase"
-      ? doc.segments.map((s) => ({ text: s.text, s: s.start_us, e: s.end_us }))
-      : doc.words
-          .filter((w) => !w.rejected)
-          .map((w) => ({ text: w.text, s: w.start_us, e: w.end_us }));
-  const effStyle = mode === "phrase" ? style : { ...style, size: style.size * 1.6 };
-  for (const item of items) {
-    const tlStart = assetTimeToTimeline(project, doc.asset_id, item.s);
+  // word mode: one big word at a time (shorts style)
+  const effStyle = { ...style, size: style.size * 1.6 };
+  for (const w of doc.words) {
+    if (w.rejected) continue;
+    const tlStart = assetTimeToTimeline(project, doc.asset_id, w.start_us);
     if (tlStart === null) continue;
-    const tlEnd = tlStart + (item.e - item.s);
     const from = Math.max(tlStart, clip.start);
-    const to = Math.min(tlEnd, clip.start + clip.duration);
-    if (playheadUs >= from && playheadUs < to) return { content: item.text, style: effStyle };
+    const to = Math.min(tlStart + (w.end_us - w.start_us), clip.start + clip.duration);
+    if (playheadUs >= from && playheadUs < to) return { content: w.text, style: effStyle };
   }
   return null;
 }
