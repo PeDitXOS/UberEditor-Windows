@@ -23,6 +23,11 @@ fn resolve_path(base: &Path, p: &str) -> PathBuf {
     if path.is_absolute() { path.to_path_buf() } else { base.join(path) }
 }
 
+/// Same path resolution the export uses, for the preview compositor.
+pub fn resolve_path_pub(base: &Path, p: &str) -> PathBuf {
+    resolve_path(base, p)
+}
+
 /// Audible clip: any media clip (on an audio or video track) whose asset
 /// has audio, with no clip or track mute.
 struct AudioItem {

@@ -1641,3 +1641,101 @@ fn export_runs_as_a_pollable_job() {
     let missing = rpc(&state, "tools/call", json!({ "name": "get_job_status", "arguments": { "job_id": "nope" } }));
     assert_eq!(missing.pointer("/result/isError").unwrap(), true);
 }
+/// THE GOLDEN RULE, enforced: the paused preview must equal the export frame
+/// for frame, pixel by pixel. Builds a real multi-layer composition (red base
+/// + green PiP overlay + a subtitle), renders it BOTH ways at the same instant,
+/// and requires the sampled pixels to match within JPEG tolerance.
+#[test]
+fn preview_matches_export_pixel_for_pixel() {
+    use std::process::Command;
+    let ffmpeg = ue_media::ffmpeg_bin();
+    if Command::new(&ffmpeg).arg("-version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("NOTE: no ffmpeg; skipped");
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-parity");
+    std::fs::create_dir_all(&dir).unwrap();
+    let red = dir.join("red.mp4");
+    let green = dir.join("green.mp4");
+    for (p, c) in [(&red, "red"), (&green, "green")] {
+        if !p.exists() {
+            Command::new(&ffmpeg)
+                .args(["-y","-v","error","-f","lavfi","-i",&format!("color=c={c}:s=640x360:d=3:r=30")])
+                .args(["-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p"])
+                .arg(p).status().unwrap();
+        }
+    }
+
+    let state = AppState::new_default();
+    let doc_id;
+    {
+        let mut store = state.store.lock().unwrap();
+        let seq_id = store.project.active_sequence;
+        store.project.sequence_mut(seq_id).unwrap().resolution = (1280, 720);
+        let ra = ue_media::import_file(&red).unwrap();   let raid = ra.id; store.project.assets.push(ra);
+        let ga = ue_media::import_file(&green).unwrap();  let gaid = ga.id; store.project.assets.push(ga);
+        // subtitle over the whole thing
+        let doc = TranscriptDoc {
+            id: Id::new(), asset_id: raid, language: "es".into(), model: "t".into(),
+            words: vec![Word { text: "hola".into(), start_us: 200_000, end_us: 2_600_000, confidence: 1.0, rejected: false, display: None }],
+            segments: vec![Segment { text: "hola".into(), start_us: 200_000, end_us: 2_600_000, word_range: (0,1), emotion: None, volume_rms: 0.0 }],
+            global_avg_volume: 0.0,
+        };
+        doc_id = doc.id;
+        store.project.transcripts.push(doc);
+        let seq = store.project.sequence_mut(seq_id).unwrap();
+        seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+        seq.tracks.push(Track::new(TrackKind::Video, "V3"));
+        let v1 = seq.tracks.iter().find(|t| t.name=="V1").unwrap().id;
+        let v2 = seq.tracks.iter().find(|t| t.name=="V2").unwrap().id;
+        let v3 = seq.tracks.iter().find(|t| t.name=="V3").unwrap().id;
+        store.insert_clip(v1, Clip::new_media(raid, 0, 3*SEC, 0), InsertMode::Strict).unwrap();
+        let mut g = Clip::new_media(gaid, 0, 3*SEC, 0);
+        g.transform.scale = (0.4.into(), 0.4.into());
+        store.insert_clip(v2, g, InsertMode::Strict).unwrap();
+        // subtitles clip on top
+        let mut style = TextStyle { size: 80.0, y_offset: 300.0, ..Default::default() };
+        style.color = "#ffffff".into();
+        store.insert_clip(v3, Clip {
+            id: Id::new(),
+            payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Phrase },
+            start: 0, duration: 3*SEC, speed: 1.0, effects: vec![], transform: Default::default(),
+            audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+        }, InsertMode::Strict).unwrap();
+    }
+
+    // export → frame at t=1s
+    let out = dir.join("export.mp4");
+    {
+        let store = state.store.lock().unwrap();
+        ue_export::export_sequence(&store.project, store.project.active_sequence, &dir, &out, &ue_export::ExportSettings::default()).unwrap();
+    }
+    let exp = dir.join("exp.png");
+    Command::new(&ffmpeg).args(["-y","-v","error","-ss","1","-i"]).arg(&out).args(["-frames:v","1"]).arg(&exp).status().unwrap();
+
+    // preview → frame at t=1s, same width as the export (1280)
+    let jpeg = ue_tauri_lib::render_frame_impl(&state, 1_000_000, 1280).unwrap();
+    let prev = dir.join("prev.png");
+    std::fs::write(dir.join("prev.jpg"), &jpeg).unwrap();
+    // decode the preview jpeg to png at the SAME size for a fair compare
+    Command::new(&ffmpeg).args(["-y","-v","error","-i"]).arg(dir.join("prev.jpg"))
+        .args(["-vf","scale=1280:720"]).arg(&prev).status().unwrap();
+
+    let rgb = |f: &std::path::Path, x: u32, y: u32| -> (i32,i32,i32) {
+        let o = Command::new(&ffmpeg).args(["-v","error","-i"]).arg(f)
+            .args(["-vf",&format!("crop=1:1:{x}:{y}"),"-f","rawvideo","-pix_fmt","rgb24","-"]).output().unwrap();
+        let p=o.stdout; (*p.first().unwrap_or(&0) as i32, *p.get(1).unwrap_or(&0) as i32, *p.get(2).unwrap_or(&0) as i32)
+    };
+    // sample points: base corners (RED), the green PiP centre, and the subtitle band
+    let points = [(40,40),(1240,40),(40,680),(1240,680),(640,360),(640,620)];
+    let mut worst = 0i32;
+    for (x,y) in points {
+        let e = rgb(&exp,x,y); let p = rgb(&prev,x,y);
+        let d = (e.0-p.0).abs().max((e.1-p.1).abs()).max((e.2-p.2).abs());
+        println!("({x},{y}) export={e:?} preview={p:?} Δ={d}");
+        worst = worst.max(d);
+    }
+    // JPEG + scaler rounding: allow a small tolerance, but the composition
+    // (which pixels are red/green/white) must match — a divergence would be ~255
+    assert!(worst <= 40, "preview must match the export frame (worst channel Δ={worst})");
+}

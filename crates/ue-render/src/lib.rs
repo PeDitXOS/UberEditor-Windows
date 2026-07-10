@@ -208,9 +208,24 @@ pub fn clip_vf_sampled(
     canvas: Option<(u32, u32)>,
     at_us: i64,
 ) -> Option<String> {
+    clip_vf_sampled_ex(registry, effects, transform, canvas, at_us, false)
+}
+
+/// Like `clip_vf_sampled`, but `transparent` composites the transform over an
+/// alpha-0 canvas (a PiP layer) instead of an opaque one (the base). Both
+/// evaluate every curve at `at_us` and bake it, so a SINGLE extracted frame
+/// renders exactly as the export does at that instant.
+pub fn clip_vf_sampled_ex(
+    registry: &[EffectDef],
+    effects: &[EffectInstance],
+    transform: &ue_core::model::Transform2D,
+    canvas: Option<(u32, u32)>,
+    at_us: i64,
+    transparent: bool,
+) -> Option<String> {
     match (
         render_chain_at(registry, effects, at_us),
-        transform_vf_full(&transform.sampled(at_us), canvas, false, "t", true),
+        transform_vf_full(&transform.sampled(at_us), canvas, transparent, "t", true),
     ) {
         (Some(e), Some(t)) => Some(format!("{e},{t}")),
         (Some(e), None) => Some(e),

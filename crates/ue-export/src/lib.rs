@@ -11,6 +11,7 @@
 pub mod edl;
 pub mod avatar_gen;
 pub mod graph;
+pub mod preview;
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;

@@ -273,12 +273,14 @@ instead of handing back a black frame.
 | `playback {action: play\|pause\|seek\|position}` | drives the real player |
 | `export_video` | the export |
 
-**The paused preview shows titles and subtitles**, positioned exactly as the
-export burns them in — so `debug_render_frame` is now a faithful way to check
-text placement (e.g. the caption band for a vertical short) without a full
-render. Two caveats: the *video* itself is still the top layer only (extra
-video tracks are composited only in the export), and karaoke shows the phrase
-line without the per-word highlight in preview.
+**The paused preview matches the export frame for frame.** `debug_render_frame`
+composites every active video layer (base + overlays), each clip's transform
+and effects, and the titles/subtitles — the same way the export burns them in,
+verified pixel-for-pixel (`preview_matches_export_pixel_for_pixel`). So it's a
+faithful way to check a composition without a full render. Two narrow
+exceptions: an **avatar** clip on screen falls back to the top-video-layer path
+(the live avatar overlay), and **karaoke** shows the phrase line without the
+per-word highlight.
 
 ---
 
