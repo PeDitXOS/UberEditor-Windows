@@ -38,6 +38,9 @@ struct AudioItem {
     /// Balance -1..1 (same law as the live mixer).
     pan: f64,
     denoise: bool,
+    /// Denoised conform WAV to read audio from (DNS64 output): exact parity
+    /// with the live mixer. None → original asset (afftdn fallback inline).
+    input_override: Option<PathBuf>,
     fade_in_us: TimeUs,
     fade_out_us: TimeUs,
 }
@@ -122,6 +125,16 @@ fn collect_audio(project: &Project, sequence_id: Id) -> Vec<AudioItem> {
                     gain_curve,
                     pan: clip.audio.pan.eval(0).clamp(-1.0, 1.0),
                     denoise: clip.audio.denoise,
+                    input_override: clip
+                        .audio
+                        .denoise
+                        .then(|| {
+                            asset.audio_conform.as_ref().map(|c| {
+                                ue_media::denoise::denoised_path(std::path::Path::new(c))
+                            })
+                        })
+                        .flatten()
+                        .filter(|p| p.exists()),
                     fade_in_us: clip.audio.fade_in_us,
                     fade_out_us: clip.audio.fade_out_us,
                 });
@@ -325,19 +338,22 @@ fn build_audio_only_args(
         .max()
         .unwrap_or(0);
 
-    let mut input_index: BTreeMap<Id, usize> = BTreeMap::new();
+    let mut input_index: BTreeMap<PathBuf, usize> = BTreeMap::new();
     let mut inputs: Vec<PathBuf> = vec![];
-    let mut input_of = |asset_id: Id, project: &Project| -> usize {
-        *input_index.entry(asset_id).or_insert_with(|| {
-            let asset = project.asset(asset_id).expect("validated when collecting");
-            inputs.push(resolve_path(base_dir, &asset.path));
+    let mut input_of_path = |path: PathBuf| -> usize {
+        *input_index.entry(path.clone()).or_insert_with(|| {
+            inputs.push(path);
             inputs.len() - 1
         })
     };
     let mut fc: Vec<String> = vec![];
     let mut alabels: Vec<String> = vec![];
     for (k, item) in audio_items.iter().enumerate() {
-        let idx = input_of(item.asset_id, project);
+        let path = item.input_override.clone().unwrap_or_else(|| {
+            let asset = project.asset(item.asset_id).expect("validated when collecting");
+            resolve_path(base_dir, &asset.path)
+        });
+        let idx = input_of_path(path);
         let label = format!("a{k}");
         let dur_us = (((item.src_out - item.src_in) as f64) / item.speed).round() as TimeUs;
         let mut chain = format!(
@@ -346,7 +362,8 @@ fn build_audio_only_args(
             secs(item.src_in),
             secs(item.src_out),
         );
-        if item.denoise {
+        if item.denoise && item.input_override.is_none() {
+            // fallback: the denoised conform isn't rendered yet
             chain.push(',');
             chain.push_str(ue_media::denoise::DENOISE_FILTER);
         }
@@ -931,14 +948,17 @@ pub fn build_ffmpeg_args(
     let fps = format!("{}/{}", seq.fps.0, seq.fps.1);
 
     // unique inputs per asset
-    let mut input_index: BTreeMap<Id, usize> = BTreeMap::new();
+    let mut input_index: BTreeMap<PathBuf, usize> = BTreeMap::new();
     let mut inputs: Vec<PathBuf> = vec![];
-    let mut input_of = |asset_id: Id, project: &Project| -> usize {
-        *input_index.entry(asset_id).or_insert_with(|| {
-            let asset = project.asset(asset_id).expect("validated in the EDL");
-            inputs.push(resolve_path(base_dir, &asset.path));
+    let mut input_of_path = |path: PathBuf| -> usize {
+        *input_index.entry(path.clone()).or_insert_with(|| {
+            inputs.push(path);
             inputs.len() - 1
         })
+    };
+    let mut input_of = |asset_id: Id, project: &Project| -> usize {
+        let asset = project.asset(asset_id).expect("validated in the EDL");
+        input_of_path(resolve_path(base_dir, &asset.path))
     };
 
     // ---- video chains ----
@@ -1083,7 +1103,11 @@ pub fn build_ffmpeg_args(
     let is_gif = settings.format == crate::ExportFormat::Gif;
     let mut alabels: Vec<String> = vec![];
     for (k, item) in audio_items.iter().enumerate().filter(|_| !is_gif) {
-        let idx = input_of(item.asset_id, project);
+        let path = item.input_override.clone().unwrap_or_else(|| {
+            let asset = project.asset(item.asset_id).expect("validated when collecting");
+            resolve_path(base_dir, &asset.path)
+        });
+        let idx = input_of_path(path);
         let label = format!("a{k}");
         let dur_us = (((item.src_out - item.src_in) as f64) / item.speed).round() as TimeUs;
         let mut chain = format!(
@@ -1092,7 +1116,8 @@ pub fn build_ffmpeg_args(
             secs(item.src_in),
             secs(item.src_out),
         );
-        if item.denoise {
+        if item.denoise && item.input_override.is_none() {
+            // fallback: the denoised conform isn't rendered yet
             chain.push(',');
             chain.push_str(ue_media::denoise::DENOISE_FILTER);
         }

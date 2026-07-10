@@ -122,8 +122,8 @@ await page.getByRole("button", { name: /Text/ }).click();
 await page.waitForTimeout(250);
 // scoped to the left panel and exact: "physics" also appears in the project title
 const textPanel = page.locator("aside").first();
-await textPanel.getByText("physics", { exact: true }).click();
-await textPanel.getByText("collisions", { exact: true }).click();
+await textPanel.getByText("physics", { exact: true }).click({ modifiers: ["Alt"] });
+await textPanel.getByText("collisions", { exact: true }).click({ modifiers: ["Alt"] });
 const cutBtn = await page.getByText(/Cut 2 word/).count();
 if (cutBtn === 0) throw new Error("the word selection is not reflected in the cut button");
 await shot("08-text-based-editing");

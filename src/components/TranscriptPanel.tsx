@@ -232,7 +232,7 @@ function WordsView({ docId }: { docId: string }) {
           </button>
         </div>
         <p className="mt-1.5 text-[10px] leading-snug text-ink-faint">
-          Click marks · double-click renames · ⌥click jumps to the word
+          Click jumps to the word · ⌥click marks for cutting · double-click renames
         </p>
       </div>
     </>
@@ -278,8 +278,8 @@ function WordSpan({
       ].join(" ")}
       title={word.display ? `Corrected (was “${word.text}”)` : undefined}
       onClick={(e) => {
-        if (e.altKey) onSeek();
-        else onToggle();
+        if (e.altKey) onToggle();
+        else onSeek();
       }}
       onDoubleClick={(e) => {
         e.preventDefault();

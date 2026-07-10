@@ -534,7 +534,10 @@ function ClipInspector({ clip }: { clip: Clip }) {
           />
         </Row>
         <Row label="Denoise">
-          <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-[11px] text-ink-dim">
+          <label
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-[11px] text-ink-dim"
+            title="DNS64 neural denoiser (same engine as the toolkit); renders in the background — playback and export switch to the clean audio when ready"
+          >
             <input
               type="checkbox"
               className="accent-(--color-accent)"

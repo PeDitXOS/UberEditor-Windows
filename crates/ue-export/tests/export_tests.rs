@@ -1638,6 +1638,62 @@ fn denoise_flag_inserts_afftdn() {
     assert!(fc.contains("afftdn"), "denoise filter present: {fc}");
 }
 
+/// With the denoised conform rendered (DNS64 output), the export reads audio
+/// FROM that wav (exact live parity) and skips the inline afftdn fallback.
+#[test]
+fn denoised_wav_becomes_the_audio_input() {
+    let Some(dir) = media_dir() else { return };
+    let (mut store, seq_id) = simple_store(dir);
+    // fake conform + denoised sibling
+    let conform = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fake-conform.wav");
+    let denoised = ue_media::denoise::denoised_path(&conform);
+    let st = Command::new(ue_media::ffmpeg_bin())
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=200:duration=4",
+               "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le"])
+        .arg(&denoised)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let aid = {
+        let seq = store.project.sequences.iter_mut().find(|s| s.id == seq_id).unwrap();
+        let clip = seq
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Video)
+            .and_then(|t| t.clips.first_mut())
+            .unwrap();
+        clip.audio.denoise = true;
+        match &clip.payload {
+            ClipPayload::Media { asset_id, .. } => *asset_id,
+            _ => panic!(),
+        }
+    };
+    store
+        .project
+        .assets
+        .iter_mut()
+        .find(|a| a.id == aid)
+        .unwrap()
+        .audio_conform = Some(conform.to_string_lossy().into_owned());
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-denoise-input.mp4");
+    let plan = ue_export::graph::build_ffmpeg_args(
+        &store.project,
+        seq_id,
+        dir,
+        &out,
+        &ExportSettings::default(),
+    )
+    .unwrap();
+    let args_s = plan.args.join(" ");
+    assert!(
+        args_s.contains("denoise.wav"),
+        "the denoised wav is an ffmpeg input: {args_s}"
+    );
+    let fc = plan.args.iter().find(|a| a.contains("amix")).unwrap();
+    assert!(!fc.contains("afftdn"), "no inline fallback when the wav exists: {fc}");
+}
+
 /// Word corrections ("godo" → "godot") show up in the caption drawtexts.
 #[test]
 fn corrected_words_appear_in_captions() {
