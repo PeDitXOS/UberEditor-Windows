@@ -167,12 +167,41 @@ fn tool_defs() -> Value {
         ),
         tool(
             "get_transcript",
-            "Word-level transcript of an asset: words with µs timestamps, \
-             confidence, `rejected`, and `display` (the corrected spelling used \
-             by captions), plus the segments with their emotion and volume. \
-             Errors if the asset was never transcribed.",
-            json!({ "asset_id": str_("asset id (from get_media_pool)") }),
-            &["asset_id"], Kind::Read,
+            "The transcript of an asset, at the granularity you ask for. A full \
+             word-level dump is HUGE (100k+ chars) — default to 'phrases' \
+             (caption-sized chunks with timestamps: the right unit for choosing \
+             cuts) and narrow with start_us/end_us. Use 'words' only for a small \
+             window. Identify the transcript by asset_id or transcript_id.",
+            json!({
+                "asset_id": str_("asset id (from get_media_pool)"),
+                "transcript_id": str_("or the transcript id directly"),
+                "granularity": {
+                    "type": "string",
+                    "enum": ["text", "segments", "phrases", "sentences", "words"],
+                    "description": "text = plain words, no timing; segments = Whisper's own \
+                        coarse chunks (carry emotion); phrases/sentences = caption-sized chunks \
+                        with timestamps (default); words = every word with its µs span"
+                },
+                "start_us": int("only include material overlapping [start_us, end_us)"),
+                "end_us": int("window end in µs"),
+                "max_chars": int("phrases: target characters per phrase (default 48)"),
+            }),
+            &[], Kind::Read,
+        ),
+        tool(
+            "find_words",
+            "Search the transcript for a word or short phrase and get each hit's \
+             timestamp plus a few neighbour words for context. This is how you \
+             locate a cut: e.g. find 'in conclusion' → its start_us, then \
+             cut_ranges or move_range around it. Matching ignores case and \
+             punctuation.",
+            json!({
+                "query": str_("a word or a short exact phrase to find"),
+                "asset_id": str_("asset id (or transcript_id)"),
+                "transcript_id": str_("or the transcript id directly"),
+                "context": int("neighbour words to include on each side (default 4, max 20)"),
+            }),
+            &["query"], Kind::Read,
         ),
         tool(
             "get_catalog",
@@ -929,17 +958,8 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
             serde_json::to_value(&state.store.lock().unwrap().project.assets)
                 .map_err(|e| e.to_string()),
         ),
-        "get_transcript" => finish((|| {
-            let asset_id = args.id("asset_id")?;
-            let store = state.store.lock().unwrap();
-            let doc = store
-                .project
-                .transcripts
-                .iter()
-                .find(|t| t.asset_id == asset_id)
-                .ok_or("the asset has no transcript yet; call transcribe_asset first")?;
-            serde_json::to_value(doc).map_err(|e| e.to_string())
-        })()),
+        "get_transcript" => finish(get_transcript(state, &args)),
+        "find_words" => finish(find_words(state, &args)),
         "get_catalog" => finish(get_catalog(state)),
 
         // --------------------------------------------------------------- media
@@ -1354,6 +1374,166 @@ fn get_project_summary(state: &AppState) -> Result<Value, String> {
         "can_undo": store.can_undo(),
         "can_redo": store.can_redo(),
         "undo_history": store.undo_labels(),
+    }))
+}
+
+/// Finds a transcript by asset id OR transcript id (agents have either).
+fn find_transcript<'a>(
+    project: &'a ue_core::model::Project,
+    args: &Args,
+) -> Result<&'a ue_core::model::TranscriptDoc, String> {
+    if let Some(tid) = args.opt_id("transcript_id")? {
+        return project
+            .transcripts
+            .iter()
+            .find(|t| t.id == tid)
+            .ok_or_else(|| "transcript not found".to_string());
+    }
+    let asset_id = args.id("asset_id")?;
+    project
+        .transcripts
+        .iter()
+        .find(|t| t.asset_id == asset_id)
+        .ok_or_else(|| "the asset has no transcript yet; call transcribe_asset first".to_string())
+}
+
+/// The raw word dump is enormous (100k+ chars). Default to a compact,
+/// phrase-level view with timestamps, and let the caller pick the granularity
+/// and a time window so it never has to pull everything.
+fn get_transcript(state: &AppState, args: &Args) -> Result<Value, String> {
+    let store = state.store.lock().unwrap();
+    let doc = find_transcript(&store.project, args)?;
+    let granularity = args.get("granularity").and_then(|v| v.as_str()).unwrap_or("phrases");
+    // optional [start_us, end_us) window (defaults to the whole thing)
+    let win_start = args.get("start_us").and_then(|v| v.as_i64()).unwrap_or(i64::MIN);
+    let win_end = args.get("end_us").and_then(|v| v.as_i64()).unwrap_or(i64::MAX);
+    let overlaps = |a: i64, b: i64| a < win_end && b > win_start;
+
+    let base = json!({
+        "transcript_id": doc.id.to_string(),
+        "asset_id": doc.asset_id.to_string(),
+        "language": doc.language,
+        "word_count": doc.words.len(),
+    });
+    let mut out = base.as_object().unwrap().clone();
+    match granularity {
+        // just the words, no timing: cheap, for reading/searching
+        "text" => {
+            let text: String = doc
+                .words
+                .iter()
+                .filter(|w| !w.rejected && overlaps(w.start_us, w.end_us))
+                .map(|w| w.label())
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.insert("text".into(), json!(text));
+        }
+        // Whisper's own segments (coarse, carry emotion/volume)
+        "segments" => {
+            let segs: Vec<Value> = doc
+                .segments
+                .iter()
+                .filter(|s| overlaps(s.start_us, s.end_us))
+                .map(|s| json!({
+                    "text": s.text, "start_us": s.start_us, "end_us": s.end_us,
+                    "emotion": s.emotion,
+                }))
+                .collect();
+            out.insert("segments".into(), json!(segs));
+        }
+        // phrase-level chunks with timestamps: the sweet spot for choosing cuts
+        "phrases" | "sentences" => {
+            let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(48) as usize;
+            let phrases: Vec<Value> = ue_export::graph::transcript_phrases(doc, max_chars)
+                .into_iter()
+                .filter(|(_, a, b)| overlaps(*a, *b))
+                .map(|(text, start_us, end_us)| json!({
+                    "text": text, "start_us": start_us, "end_us": end_us,
+                }))
+                .collect();
+            out.insert("phrases".into(), json!(phrases));
+        }
+        // the full word-level detail (can be huge): use a window
+        "words" => {
+            let words: Vec<Value> = doc
+                .words
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| overlaps(w.start_us, w.end_us))
+                .map(|(i, w)| json!({
+                    "index": i, "text": w.label(), "start_us": w.start_us, "end_us": w.end_us,
+                    "rejected": w.rejected,
+                }))
+                .collect();
+            if doc.words.len() > 4000 && win_start == i64::MIN && win_end == i64::MAX {
+                out.insert("note".into(), json!(
+                    "large transcript returned whole; pass start_us/end_us to window it, \
+                     or use granularity 'phrases'"
+                ));
+            }
+            out.insert("words".into(), json!(words));
+        }
+        other => {
+            return Err(format!(
+                "unknown granularity '{other}' (text|segments|phrases|words)"
+            ))
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Locate a word or short phrase in a transcript and return each hit with its
+/// timestamp and a few neighbour words for context — so an agent can find the
+/// cut point for "remove the sentence about X" without pulling everything.
+fn find_words(state: &AppState, args: &Args) -> Result<Value, String> {
+    let query = args.str("query")?.trim().to_lowercase();
+    if query.is_empty() {
+        return Err("query is empty".into());
+    }
+    let context = args.get("context").and_then(|v| v.as_i64()).unwrap_or(4).clamp(0, 20) as usize;
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    let store = state.store.lock().unwrap();
+    let doc = find_transcript(&store.project, args)?;
+    let words = &doc.words;
+    let norm = |w: &ue_core::model::Word| {
+        w.label().to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+    };
+    let normed: Vec<String> = words.iter().map(norm).collect();
+    let want: Vec<String> = terms
+        .iter()
+        .map(|t| t.chars().filter(|c| c.is_alphanumeric()).collect())
+        .collect();
+
+    let mut hits: Vec<Value> = vec![];
+    for i in 0..normed.len() {
+        if i + want.len() > normed.len() {
+            break;
+        }
+        if (0..want.len()).all(|k| normed[i + k] == want[k]) {
+            let last = i + want.len() - 1;
+            let ctx_a = i.saturating_sub(context);
+            let ctx_b = (last + context + 1).min(words.len());
+            let ctx = words[ctx_a..ctx_b]
+                .iter()
+                .map(|w| w.label())
+                .collect::<Vec<_>>()
+                .join(" ");
+            hits.push(json!({
+                "index": i,
+                "start_us": words[i].start_us,
+                "end_us": words[last].end_us,
+                "context": ctx,
+            }));
+        }
+        if hits.len() >= 100 {
+            break;
+        }
+    }
+    Ok(json!({
+        "transcript_id": doc.id.to_string(),
+        "query": query,
+        "matches": hits.len(),
+        "hits": hits,
     }))
 }
 

@@ -124,7 +124,8 @@ fn tools_cover_the_whole_editor_and_are_documented() {
 
     for expected in [
         // read
-        "get_project_summary", "get_timeline", "get_media_pool", "get_transcript", "get_catalog",
+        "get_project_summary", "get_timeline", "get_media_pool", "get_transcript",
+        "find_words", "get_catalog",
         // media
         "import_media", "transcribe_asset", "relink_asset", "set_project_settings",
         // timeline
@@ -1362,7 +1363,7 @@ fn tool_count_matches_the_docs() {
     let state = AppState::new_default();
     let tools = rpc(&state, "tools/list", json!({}));
     let n = tools.pointer("/result/tools").unwrap().as_array().unwrap().len();
-    assert_eq!(n, 47, "README/docs/MCP.md advertise the tool count; update them");
+    assert_eq!(n, 48, "README/docs/MCP.md advertise the tool count; update them");
 }
 
 /// GOLDEN RULE: the paused preview must show subtitles, exactly like the
@@ -1471,4 +1472,80 @@ fn preview_frame_shows_subtitles_like_export() {
     let frame2 = dir.join("preview_before.jpg");
     std::fs::write(&frame2, &jpeg2).unwrap();
     assert_eq!(bright(&frame2), 0, "no caption before the first word");
+}
+
+/// get_transcript respects granularity + a time window, and find_words locates
+/// a phrase with its timestamp and neighbour context (the ergonomics an agent
+/// needs instead of the 100k-char word dump).
+#[test]
+fn transcript_granularity_and_word_search() {
+    let state = AppState::new_default();
+    let (asset_id, transcript_id);
+    {
+        let mut store = state.store.lock().unwrap();
+        // a tiny asset with a transcript: "programar es trabajo de alguien mas"
+        let asset = MediaAsset {
+            id: Id::new(), kind: MediaKind::Audio, path: "a.wav".into(), content_hash: "h".into(),
+            probe: ProbeInfo { duration_us: 6 * SEC, fps: None, width: 0, height: 0, rotation: 0,
+                vcodec: None, acodec: Some("pcm".into()), audio_channels: 1, vfr: false },
+            proxy: None, audio_conform: None, peaks: None, thumbnails: None, transcript: None, offline: false,
+        };
+        asset_id = asset.id;
+        let words: Vec<Word> = ["programar", "es", "trabajo", "de", "alguien", "mas"]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                text: (*w).into(),
+                start_us: i as i64 * SEC,
+                end_us: i as i64 * SEC + 800_000,
+                confidence: 1.0, rejected: false, display: None,
+            })
+            .collect();
+        let doc = TranscriptDoc {
+            id: Id::new(), asset_id, language: "es".into(), model: "t".into(),
+            words,
+            segments: vec![Segment {
+                text: "programar es trabajo de alguien mas".into(),
+                start_us: 0, end_us: 6 * SEC, word_range: (0, 6), emotion: None, volume_rms: 0.0,
+            }],
+            global_avg_volume: 0.0,
+        };
+        transcript_id = doc.id;
+        store.project.assets.push(asset);
+        store.project.transcripts.push(doc);
+    }
+    let call = |name: &str, arguments: Value| tool_json(&rpc(&state, "tools/call", json!({ "name": name, "arguments": arguments })));
+
+    // text granularity: just the words joined
+    let text = call("get_transcript", json!({ "asset_id": asset_id.to_string(), "granularity": "text" }));
+    assert_eq!(text["text"], "programar es trabajo de alguien mas");
+
+    // phrases: carry timestamps
+    let ph = call("get_transcript", json!({ "asset_id": asset_id.to_string(), "granularity": "phrases" }));
+    assert!(ph["phrases"].as_array().unwrap()[0]["start_us"].is_i64());
+
+    // words windowed to [2s, 4s) → only "trabajo" (2.0..2.8) and "de" (3.0..3.8)
+    let win = call("get_transcript", json!({
+        "asset_id": asset_id.to_string(), "granularity": "words",
+        "start_us": 2 * SEC, "end_us": 4 * SEC,
+    }));
+    let ws: Vec<String> = win["words"].as_array().unwrap().iter()
+        .map(|w| w["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ws, vec!["trabajo", "de"], "the window clipped the words");
+
+    // find_words by transcript_id, with context
+    let hits = call("find_words", json!({ "transcript_id": transcript_id.to_string(), "query": "trabajo", "context": 1 }));
+    assert_eq!(hits["matches"], 1);
+    let hit = &hits["hits"][0];
+    assert_eq!(hit["start_us"], 2 * SEC);
+    assert_eq!(hit["context"], "es trabajo de", "one neighbour on each side");
+
+    // multi-word phrase match
+    let phrase = call("find_words", json!({ "asset_id": asset_id.to_string(), "query": "alguien mas" }));
+    assert_eq!(phrase["matches"], 1);
+    assert_eq!(phrase["hits"][0]["start_us"], 4 * SEC);
+
+    // a miss is zero hits, not an error
+    let none = call("find_words", json!({ "asset_id": asset_id.to_string(), "query": "godot" }));
+    assert_eq!(none["matches"], 0);
 }

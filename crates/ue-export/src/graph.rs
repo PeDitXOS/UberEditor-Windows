@@ -503,6 +503,17 @@ const CAPTION_MAX_DUR_US: i64 = 6_000_000;
 /// A caption lingers this long after its last word (until the next one).
 const CAPTION_LINGER_US: i64 = 600_000;
 
+/// Phrase-level chunking of a transcript from its WORD timestamps: the same
+/// grouping the captions use (`max_chars` ~= a caption line). Public so agents
+/// can ask for "sentences with timestamps" instead of the raw 100k-word dump.
+/// Returns (text, start_us, end_us); the end includes the caption linger.
+pub fn transcript_phrases(
+    doc: &ue_core::model::TranscriptDoc,
+    max_chars: usize,
+) -> Vec<(String, i64, i64)> {
+    caption_phrases(doc, max_chars.clamp(8, 200))
+}
+
 /// Build caption phrases straight from the WORDS (Whisper's own segment
 /// grouping can span minutes of continuous speech). New caption on: line
 /// full, pause > CAPTION_GAP_US, or duration > CAPTION_MAX_DUR_US. Windows
