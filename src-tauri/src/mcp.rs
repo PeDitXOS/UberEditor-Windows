@@ -706,22 +706,25 @@ fn tool_defs() -> Value {
         ),
         tool(
             "debug_render_frame",
-            "Renders the PAUSED-preview frame at t_us through the exact chain \
-             the export uses, writes it to a temp JPEG and returns {path, bytes}. \
-             Read the file to SEE what the editor sees. `bytes: 0` or a tiny file \
-             means the frame came out black.",
+            "Renders the paused-preview frame at t_us and RETURNS IT AS AN IMAGE \
+             you can see, plus the temp path it was saved to. The frame includes \
+             the titles and subtitles active at t_us, composited the same way the \
+             export burns them in — so this is a faithful check of what \
+             export_video will write. Only the top video layer is shown for the \
+             video itself (extra video tracks are export-only). Errors instead of \
+             returning a black frame when no clip covers t_us.",
             json!({
                 "t_us": int("timeline time in µs"),
-                "max_width": int("render width in px (default 1280)"),
+                "max_width": int("render width in px, 64..1600 (default 1280)"),
             }),
             &["t_us"], Kind::Read,
         ),
         tool(
             "debug_playback_frame",
-            "Dumps the frame currently sitting in the PLAYBACK stream buffer to a \
-             temp JPEG and returns {path, bytes}. `bytes: 0` = the stream produced \
-             nothing (playback is broken or stopped). Playback and paused preview \
-             are different code paths: check both.",
+            "Returns the frame currently in the PLAYBACK stream buffer AS AN \
+             IMAGE (errors if the buffer is empty: playback stopped or nothing \
+             decoded yet). Playback and the paused preview are different code \
+             paths — check both when a visual bug only shows in one.",
             json!({}), &[], Kind::Read,
         ),
         tool(
@@ -760,6 +763,19 @@ fn text_result(v: Value) -> Value {
 
 fn tool_error(msg: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": msg }], "isError": true })
+}
+
+/// A JPEG result the agent can actually SEE: an MCP `image` content block
+/// (base64) plus a one-line caption and the temp path it was also written to.
+fn image_result(jpeg: &[u8], filename: &str, caption: &str) -> Value {
+    use base64::Engine;
+    let path = std::env::temp_dir().join(filename);
+    let _ = std::fs::write(&path, jpeg);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
+    json!({ "content": [
+        { "type": "text", "text": format!("{caption} — {} bytes, also at {}", jpeg.len(), path.display()) },
+        { "type": "image", "data": b64, "mimeType": "image/jpeg" },
+    ]})
 }
 
 /// `Result` → MCP tool result, so every handler can be written with `?`.
@@ -1237,16 +1253,18 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
 
         // -------------------------------------------------------------- render
         "export_video" => finish(export_video(state, &args)),
-        "debug_render_frame" => finish((|| {
+        "debug_render_frame" => {
             let t_us = args.i64_or("t_us", 0);
-            let max_width = args.i64_or("max_width", 1280).clamp(64, 3840) as u32;
-            let bytes = crate::render_frame_impl(state, t_us, max_width)?;
-            let path = std::env::temp_dir().join("ue_debug_frame.jpg");
-            let n = bytes.len();
-            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-            Ok(json!({ "path": path.display().to_string(), "bytes": n }))
-        })()),
-        "debug_playback_frame" => finish((|| {
+            let max_width = args.i64_or("max_width", 1280).clamp(64, 1600) as u32;
+            match crate::render_frame_impl(state, t_us, max_width) {
+                Ok(bytes) if bytes.is_empty() => tool_error(
+                    "no video at that time (black frame): no clip covers t_us, or -ss ran past the clip",
+                ),
+                Ok(bytes) => image_result(&bytes, "ue_debug_frame.jpg", &format!("paused preview @ {:.3}s (includes titles + subtitles, exactly like the export)", t_us as f64 / 1e6)),
+                Err(e) => tool_error(&e),
+            }
+        }
+        "debug_playback_frame" => {
             let bytes = state
                 .frames
                 .lock()
@@ -1254,11 +1272,12 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
                 .as_ref()
                 .map(|f| f.latest.lock().unwrap().clone())
                 .unwrap_or_default();
-            let path = std::env::temp_dir().join("ue_debug_stream.jpg");
-            let n = bytes.len();
-            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-            Ok(json!({ "path": path.display().to_string(), "bytes": n }))
-        })()),
+            if bytes.is_empty() {
+                tool_error("the playback stream buffer is empty: playback is stopped, or nothing has decoded yet (call playback {\"action\":\"play\"})")
+            } else {
+                image_result(&bytes, "ue_debug_stream.jpg", "current playback-stream frame")
+            }
+        }
         "playback" => finish(playback(state, app, &args)),
 
         // ------------------------------------------------------------- history
@@ -1472,6 +1491,8 @@ fn set_clip_content(state: &AppState, args: &Args) -> Result<Value, String> {
     let store = state.store.lock().unwrap();
     let clip = store.project.clip(clip_id).ok_or("clip not found")?;
 
+    // captured so we can warn (not fail) if the chosen font isn't installed
+    let mut font_used: Option<String> = None;
     let action = match &clip.payload {
         ClipPayload::Text { content, style } => {
             let content =
@@ -1480,6 +1501,7 @@ fn set_clip_content(state: &AppState, args: &Args) -> Result<Value, String> {
                 Some(p) => patch_style(style, p)?,
                 None => style.clone(),
             };
+            font_used = Some(style.font.clone());
             ue_core::Action::SetClipText { clip_id, content, style }
         }
         ClipPayload::Subtitles { style, mode, .. } => {
@@ -1487,6 +1509,7 @@ fn set_clip_content(state: &AppState, args: &Args) -> Result<Value, String> {
                 Some(p) => patch_style(style, p)?,
                 None => style.clone(),
             };
+            font_used = Some(style.font.clone());
             let mode = match args.get("subtitles_mode").and_then(|v| v.as_str()) {
                 None => *mode,
                 Some("phrase") => SubtitleMode::Phrase,
@@ -1532,6 +1555,19 @@ fn set_clip_content(state: &AppState, args: &Args) -> Result<Value, String> {
         .unwrap()
         .dispatch("Set clip content", vec![action])
         .map_err(|e| e.to_string())?;
+
+    // a font that doesn't resolve draws NOTHING, silently — warn loudly
+    if let Some(font) = font_used {
+        if !ue_export::graph::font_is_available(&font) {
+            return Ok(json!({
+                "ok": true,
+                "warning": format!(
+                    "font '{font}' is not installed and will render as empty text; \
+                     pick one from get_catalog.fonts or use 'sans-serif'"
+                ),
+            }));
+        }
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -1809,6 +1845,22 @@ fn add_clip_inner(
 // JSON-RPC
 // ---------------------------------------------------------------------------
 
+/// Does this tool change the project (so the running UI must refresh)? The
+/// pure reads and the debug-frame dumps do not; everything else might.
+fn is_mutation(name: &str) -> bool {
+    !matches!(
+        name,
+        "get_project_summary"
+            | "get_timeline"
+            | "get_media_pool"
+            | "get_transcript"
+            | "find_words"
+            | "get_catalog"
+            | "debug_render_frame"
+            | "debug_playback_frame"
+    )
+}
+
 /// Processes a JSON-RPC message. `None` = notification with no response.
 pub fn handle_rpc(state: &AppState, app: Option<&tauri::AppHandle>, req: &Value) -> Option<Value> {
     let method = req.get("method")?.as_str()?;
@@ -1844,11 +1896,20 @@ pub fn handle_rpc(state: &AppState, app: Option<&tauri::AppHandle>, req: &Value)
             let args = req.pointer("/params/arguments").unwrap_or(&empty);
             ue_core::dlog("mcp", &format!("tool {name} {args}"));
             let out = call_tool(state, app, name, args);
-            if out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let failed = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+            if failed {
                 ue_core::dlog(
                     "mcp",
                     &format!("tool {name} FAILED: {}", out.pointer("/content/0/text").unwrap_or(&Value::Null)),
                 );
+            } else if let Some(app) = app {
+                // an agent's edit must show up in the running editor: nudge the
+                // UI to re-fetch, exactly like the in-app commands do. Reads and
+                // debug frames change nothing, so they stay quiet.
+                if is_mutation(name) {
+                    use tauri::Emitter;
+                    let _ = app.emit("state-changed", ());
+                }
             }
             out
         }

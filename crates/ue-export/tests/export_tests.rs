@@ -1529,6 +1529,32 @@ fn system_fonts_enumerate_and_resolve() {
     assert!(ue_export::graph::resolve_font_family("NoSuchFontFamily9999").is_none());
 }
 
+/// The default font "sans-serif" (and the other CSS generics) MUST resolve to
+/// a real installed font, or a clip draws NOTHING silently (field bug: a
+/// subtitles clip with the default font rendered empty).
+#[test]
+fn generic_font_families_resolve_to_real_files() {
+    if ue_export::graph::list_system_fonts().is_empty() {
+        eprintln!("NOTE: no system fonts; skipped");
+        return;
+    }
+    for generic in ["sans-serif", "sans", "serif", "monospace", "mono", ""] {
+        let resolved = ue_export::graph::resolve_font_family(generic);
+        assert!(resolved.is_some(), "generic '{generic}' must map to a real font");
+        assert!(
+            std::path::Path::new(&resolved.unwrap()).exists(),
+            "the mapped font file exists for '{generic}'"
+        );
+        assert!(ue_export::graph::font_is_available(generic), "'{generic}' reports available");
+    }
+    // the default TextStyle uses one of these — it must be renderable
+    let default_font = ue_core::model::TextStyle::default().font;
+    assert!(
+        ue_export::graph::font_is_available(&default_font),
+        "the DEFAULT font '{default_font}' must render, not draw empty"
+    );
+}
+
 /// Continuous speech must be chunked into caption-sized phrases: one giant
 /// Whisper segment can NOT become one giant drawtext (the reported bug).
 #[test]

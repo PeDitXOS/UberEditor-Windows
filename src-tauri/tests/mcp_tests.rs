@@ -1364,3 +1364,111 @@ fn tool_count_matches_the_docs() {
     let n = tools.pointer("/result/tools").unwrap().as_array().unwrap().len();
     assert_eq!(n, 47, "README/docs/MCP.md advertise the tool count; update them");
 }
+
+/// GOLDEN RULE: the paused preview must show subtitles, exactly like the
+/// export burns them in. Field bug: an agent rendered the frame, saw no text,
+/// and concluded the subtitles were broken. Builds a black clip + a subtitles
+/// clip, renders the PREVIEW frame through the production path, and checks the
+/// caption pixels land in the same band the export writes them.
+#[test]
+fn preview_frame_shows_subtitles_like_export() {
+    use std::process::Command;
+    let ffmpeg = ue_media::ffmpeg_bin();
+    if Command::new(&ffmpeg).arg("-version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("NOTE: no ffmpeg; test skipped");
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-preview-subs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("black.mp4");
+    if !src.exists() {
+        let st = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=3:r=30"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(st.success());
+    }
+
+    let state = AppState::new_default();
+    let (v1, v2, aid);
+    {
+        let mut store = state.store.lock().unwrap();
+        let seq_id = store.project.active_sequence;
+        // 1080p canvas so the y_offset band matches the export test
+        store.project.sequence_mut(seq_id).unwrap().resolution = (1920, 1080);
+        let asset = ue_media::import_file(&src).unwrap();
+        aid = asset.id;
+        store.project.assets.push(asset);
+        // synthetic transcript: "hola mundo" [0.2..2.6s)
+        let doc = TranscriptDoc {
+            id: Id::new(),
+            asset_id: aid,
+            language: "es".into(),
+            model: "test".into(),
+            words: vec![
+                Word { text: "hola".into(), start_us: 200_000, end_us: 1_200_000, confidence: 1.0, rejected: false, display: None },
+                Word { text: "mundo".into(), start_us: 1_300_000, end_us: 2_600_000, confidence: 1.0, rejected: false, display: None },
+            ],
+            segments: vec![Segment {
+                text: "hola mundo".into(),
+                start_us: 200_000,
+                end_us: 2_600_000,
+                word_range: (0, 2),
+                emotion: None,
+                volume_rms: 0.0,
+            }],
+            global_avg_volume: 0.0,
+        };
+        let doc_id = doc.id;
+        store.project.transcripts.push(doc);
+        let seq = store.project.sequence_mut(seq_id).unwrap();
+        seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+        v2 = seq.tracks.last().unwrap().id;
+        v1 = seq.tracks.iter().find(|t| t.kind == TrackKind::Video && t.name == "V1").unwrap().id;
+        store.insert_clip(v1, Clip::new_media(aid, 0, 3 * SEC, 0), InsertMode::Strict).unwrap();
+        let style = TextStyle { size: 90.0, y_offset: 380.0, ..Default::default() };
+        let subs = Clip {
+            id: Id::new(),
+            payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Phrase },
+            start: 0,
+            duration: 3 * SEC,
+            speed: 1.0,
+            effects: vec![],
+            transform: Default::default(),
+            audio: Default::default(),
+            transition_in: None,
+            label_color: None,
+            group: None,
+        };
+        store.insert_clip(v2, subs, InsertMode::Strict).unwrap();
+    }
+    let _ = (v1, v2);
+
+    // render the preview frame at t=1.0s (inside the caption) at canvas width
+    let jpeg = ue_tauri_lib::render_frame_impl(&state, 1_000_000, 1920).expect("preview frame");
+    assert!(jpeg.len() > 1000, "a real frame came back");
+    let frame = dir.join("preview_1s.jpg");
+    std::fs::write(&frame, &jpeg).unwrap();
+
+    // bright pixels anywhere in the subtitle band (y≈870..990 at 1080p): crop
+    // the whole band in one pass and count light pixels
+    let bright = |png: &std::path::Path| -> usize {
+        let out = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(png)
+            .args(["-vf", "crop=1400:130:300:865", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        out.stdout.iter().filter(|&&p| p > 160).count()
+    };
+    assert!(bright(&frame) >= 50, "subtitle text visible in the preview band");
+
+    // and BEFORE the first word starts (t=0.1s < 0.2s) there is no caption
+    // (captions linger ~600 ms AFTER they end, so the gap is only at the head)
+    let jpeg2 = ue_tauri_lib::render_frame_impl(&state, 100_000, 1920).expect("frame");
+    let frame2 = dir.join("preview_before.jpg");
+    std::fs::write(&frame2, &jpeg2).unwrap();
+    assert_eq!(bright(&frame2), 0, "no caption before the first word");
+}

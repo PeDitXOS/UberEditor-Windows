@@ -25,3 +25,4 @@ ue-ai = { path = "../crates/ue-ai" }
 ue-whisper = { path = "../crates/ue-whisper" }
 ue-export = { path = "../crates/ue-export" }
 tiny_http = "0.12"
+base64 = "0.22"

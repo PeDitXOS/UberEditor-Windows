@@ -1250,9 +1250,28 @@ pub fn render_frame_impl(state: &AppState, t_us: TimeUs, max_width: u32) -> Res<
     let mut vf = ue_media::frame::resolve_top_video(&project, seq_id, t_us).and_then(|r| {
         ue_render::clip_vf_sampled(&reg, &r.effects, &r.transform, canvas, r.clip_rel_us)
     });
+    // titles + subtitles active at t_us, built from the EXACT export chain so
+    // the paused preview matches what export burns in (golden rule). They live
+    // in canvas coordinates, so when no transform already fit the frame to the
+    // canvas we fit it here before drawing, then the outer scale downsizes it.
+    let text = project.sequence(seq_id).and_then(|seq| {
+        ue_export::graph::text_overlays_at(&project, seq, seq.resolution.1, seq.resolution.0, t_us)
+    });
+    if text.is_some() && vf.is_none() {
+        if let Some((cw, ch)) = canvas {
+            vf = Some(format!(
+                "scale={cw}:{ch}:force_original_aspect_ratio=decrease,\
+                 pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black"
+            ));
+        }
+    }
     // avatar over the paused frame (movie+overlay graph in the same -vf)
     if let Some(suffix) = avatar_vf_suffix(&project, seq_id, t_us, max_width) {
         vf = Some(format!("{}{}", vf.unwrap_or_else(|| "null".into()), suffix));
+    }
+    // text last, on top (same order as the export)
+    if let Some(text) = text {
+        vf = Some(format!("{},{text}", vf.unwrap_or_else(|| "null".into())));
     }
     let t0 = std::time::Instant::now();
     let result =

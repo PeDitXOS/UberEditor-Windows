@@ -176,8 +176,45 @@ pub fn list_system_fonts() -> Vec<(String, String)> {
     out.into_iter().collect()
 }
 
-/// Resolves a family to its fontfile; None if not found.
+/// Resolves a family name to a fontfile on disk, or `None`.
+///
+/// The generic CSS families (`sans-serif`, `serif`, `monospace`, …) are NOT
+/// real family names, so fontdb can't find them; they are mapped to the first
+/// real font of that class that is actually installed. This keeps the default
+/// `sans-serif` renderable everywhere and makes the preview and the export
+/// pick the SAME concrete file.
 pub fn resolve_font_family(family: &str) -> Option<String> {
+    let name = family.trim();
+    match name.to_ascii_lowercase().as_str() {
+        "sans-serif" | "sans" | "" => resolve_first(SANS_CANDIDATES),
+        "serif" => resolve_first(SERIF_CANDIDATES),
+        "monospace" | "mono" => resolve_first(MONO_CANDIDATES),
+        _ => resolve_named(name),
+    }
+}
+
+/// Whether a family name (generic or literal) resolves to an installed font.
+/// Used to warn the agent/UI before a clip silently draws nothing.
+pub fn font_is_available(family: &str) -> bool {
+    resolve_font_family(family).is_some()
+}
+
+const SANS_CANDIDATES: &[&str] =
+    &["Arial", "Helvetica", "Helvetica Neue", "Liberation Sans", "DejaVu Sans", "Segoe UI", "Roboto"];
+const SERIF_CANDIDATES: &[&str] =
+    &["Times New Roman", "Georgia", "Liberation Serif", "DejaVu Serif", "Times"];
+const MONO_CANDIDATES: &[&str] =
+    &["Menlo", "Courier New", "Liberation Mono", "DejaVu Sans Mono", "Consolas", "Courier"];
+
+/// First candidate that resolves; failing that, any installed font at all.
+fn resolve_first(candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find_map(|c| resolve_named(c))
+        .or_else(|| find_font().map(str::to_string))
+}
+
+fn resolve_named(family: &str) -> Option<String> {
     let db = font_db();
     let query = fontdb::Query {
         families: &[fontdb::Family::Name(family)],
@@ -224,13 +261,22 @@ fn x_expr_for(style: &ue_core::model::TextStyle, scale: f64) -> String {
     }
 }
 
+/// `:enable='between(t,a,b)'` for the burned-in export, or nothing for the
+/// single-frame preview (which already picks the active item in Rust, so the
+/// filter must draw unconditionally).
+fn enable_clause(window: Option<(TimeUs, TimeUs)>) -> String {
+    match window {
+        Some((from, to)) => format!(":enable='between(t,{},{})'", secs(from), secs(to)),
+        None => String::new(),
+    }
+}
+
 fn drawtext_for(
     font_part: &str,
     content: &str,
     style: &ue_core::model::TextStyle,
     scale: f64,
-    from: TimeUs,
-    to: TimeUs,
+    enable: Option<(TimeUs, TimeUs)>,
 ) -> String {
     let fontsize = ((style.size as f64) * scale).round().max(8.0) as u32;
     let color = style.color.trim_start_matches('#');
@@ -238,13 +284,11 @@ fn drawtext_for(
     let font_part = font_part_for(style, font_part);
     format!(
         "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor=0x{color}:\
-         borderw={}:bordercolor=black@0.6:x={}:y=(h-text_h)/2+{y_off}:\
-         enable='between(t,{},{})'",
+         borderw={}:bordercolor=black@0.6:x={}:y=(h-text_h)/2+{y_off}{}",
         escape_drawtext(content),
         (2.0 * scale).round().max(1.0) as u32,
         x_expr_for(style, scale),
-        secs(from),
-        secs(to),
+        enable_clause(enable),
     )
 }
 
@@ -258,17 +302,14 @@ fn drawtext_at(
     x_expr: &str,
     y_off: i64,
     scale: f64,
-    from: TimeUs,
-    to: TimeUs,
+    enable: Option<(TimeUs, TimeUs)>,
 ) -> String {
     format!(
         "drawtext={font_part}:text='{}':fontsize={fontsize}:fontcolor={color}:\
-         borderw={}:bordercolor=black@0.6:x={x_expr}:y=(h-text_h)/2+{y_off}:\
-         enable='between(t,{},{})'",
+         borderw={}:bordercolor=black@0.6:x={x_expr}:y=(h-text_h)/2+{y_off}{}",
         escape_drawtext(content),
         (2.0 * scale).round().max(1.0) as u32,
-        secs(from),
-        secs(to),
+        enable_clause(enable),
     )
 }
 
@@ -577,13 +618,13 @@ fn karaoke_overlays(
                 .max(clip.start);
             // dim layer (whole phrase visible during the segment)
             out.push(drawtext_at(
-                &font_part, w.label(), fontsize, &base_color, &x_expr, y_off, scale, seg_from,
-                seg_to,
+                &font_part, w.label(), fontsize, &base_color, &x_expr, y_off, scale,
+                Some((seg_from, seg_to)),
             ));
             // highlighted layer (from when the word plays)
             out.push(drawtext_at(
                 &font_part, w.label(), fontsize, &hi_color, &x_expr, y_off, scale,
-                word_tl.min(seg_to), seg_to,
+                Some((word_tl.min(seg_to), seg_to)),
             ));
             prefix += widths[i] + space_w;
         }
@@ -591,19 +632,60 @@ fn karaoke_overlays(
     Some(out)
 }
 
-/// drawtext chain for the sequence's titles and automatic subtitles.
-/// The style's size/offset is referenced to 1080p and scaled to `out_h`.
+/// drawtext chain for the sequence's titles and automatic subtitles, burned
+/// into the export. Size/offset are referenced to 1080p and scaled to `out_h`.
 fn build_text_overlays(
     project: &Project,
     seq: &ue_core::model::Sequence,
     out_h: u32,
     out_w: u32,
 ) -> Option<String> {
-    use ue_core::model::{ClipPayload, TrackKind};
+    text_overlays_inner(project, seq, out_h, out_w, None)
+}
+
+/// drawtext chain for the titles/subtitles ACTIVE at timeline time `t_us`,
+/// WITHOUT any `enable` window (the single-frame preview picks the active item
+/// here and draws it unconditionally). Built from the exact same chunking,
+/// fonts, sizes and positions as [`build_text_overlays`], so the paused
+/// preview matches the export. Karaoke degrades to its phrase line (the
+/// per-word highlight is export-only).
+///
+/// `out_h`/`out_w` must be the SEQUENCE canvas, so the caller has to composite
+/// the frame at canvas size before applying this and only downscale afterwards.
+pub fn text_overlays_at(
+    project: &Project,
+    seq: &ue_core::model::Sequence,
+    out_h: u32,
+    out_w: u32,
+    t_us: TimeUs,
+) -> Option<String> {
+    text_overlays_inner(project, seq, out_h, out_w, Some(t_us))
+}
+
+/// Shared body: `at = None` burns the whole timeline in (export); `at = Some(t)`
+/// emits only what is on screen at `t`, without enable clauses (preview).
+fn text_overlays_inner(
+    project: &Project,
+    seq: &ue_core::model::Sequence,
+    out_h: u32,
+    out_w: u32,
+    at: Option<TimeUs>,
+) -> Option<String> {
+    use ue_core::model::{ClipPayload, SubtitleMode, TrackKind};
     let scale = out_h as f64 / 1080.0;
     let font_part = match find_font() {
         Some(f) => format!("fontfile={f}"),
         None => "font=sans".to_string(),
+    };
+    // for an item spanning [from, to): the enable window (export) or, in
+    // preview mode, `Some(None)` when it is on screen at `t` and `None` when
+    // it is not (so the caller skips it).
+    let window = |from: TimeUs, to: TimeUs| -> Option<Option<(TimeUs, TimeUs)>> {
+        match at {
+            None => Some(Some((from, to))),
+            Some(t) if from <= t && t < to => Some(None),
+            Some(_) => None,
+        }
     };
     let mut parts: Vec<String> = vec![];
     for track in seq.tracks.iter().filter(|t| t.kind == TrackKind::Video && !t.muted) {
@@ -613,14 +695,9 @@ fn build_text_overlays(
                     if content.trim().is_empty() {
                         continue;
                     }
-                    parts.push(drawtext_for(
-                        &font_part,
-                        content,
-                        style,
-                        scale,
-                        clip.start,
-                        clip.end(),
-                    ));
+                    if let Some(enable) = window(clip.start, clip.end()) {
+                        parts.push(drawtext_for(&font_part, content, style, scale, enable));
+                    }
                 }
                 ClipPayload::Subtitles { transcript_id, style, mode } => {
                     let Some(doc) =
@@ -628,10 +705,10 @@ fn build_text_overlays(
                     else {
                         continue;
                     };
-                    use ue_core::model::SubtitleMode;
                     // karaoke: full phrase with the current word highlighted
-                    // (progressive fill); needs font metrics
-                    if *mode == SubtitleMode::Karaoke {
+                    // (progressive fill); needs font metrics. Export only —
+                    // the preview falls through to the phrase line below.
+                    if *mode == SubtitleMode::Karaoke && at.is_none() {
                         if let Some(chains) =
                             karaoke_overlays(seq, doc, clip, style, &font_part, scale, out_w)
                         {
@@ -640,34 +717,29 @@ fn build_text_overlays(
                         }
                         // no metrics → falls back to word mode
                     }
-                    // phrase mode: caption-sized chunks per segment (a
-                    // segment can span minutes of continuous speech);
-                    // word mode: one big word at a time (shorts style)
+                    // phrase / karaoke-preview: caption-sized chunks (a segment
+                    // can span minutes of continuous speech);
+                    // word: one big word at a time (shorts style)
                     let owned_items: Vec<(String, i64, i64)> = match mode {
-                        SubtitleMode::Phrase => {
-                            let px = (style.size as f64) * scale;
-                            caption_phrases(doc, caption_max_chars(out_w, px))
-                        }
-                        SubtitleMode::Word | SubtitleMode::Karaoke => doc
+                        SubtitleMode::Word => doc
                             .words
                             .iter()
                             .filter(|w| !w.rejected)
                             .map(|w| (w.label().to_string(), w.start_us, w.end_us))
                             .collect(),
+                        SubtitleMode::Phrase | SubtitleMode::Karaoke => {
+                            let px = (style.size as f64) * scale;
+                            caption_phrases(doc, caption_max_chars(out_w, px))
+                        }
                     };
-                    let items: Vec<(&str, i64, i64)> =
-                        owned_items.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
-                    let word_scale = match mode {
-                        SubtitleMode::Phrase => 1.0,
-                        _ => 1.6, // single words larger
-                    };
+                    let word_scale = if *mode == SubtitleMode::Word { 1.6 } else { 1.0 };
                     let mut wstyle = style.clone();
                     wstyle.size *= word_scale as f32;
-                    for (text, s_us, e_us) in items {
+                    for (text, s_us, e_us) in &owned_items {
                         if text.trim().is_empty() {
                             continue;
                         }
-                        let Some(tl_start) = asset_time_to_timeline(seq, doc.asset_id, s_us)
+                        let Some(tl_start) = asset_time_to_timeline(seq, doc.asset_id, *s_us)
                         else {
                             continue; // that slice of the asset is not on the timeline
                         };
@@ -677,7 +749,9 @@ fn build_text_overlays(
                         if to <= from {
                             continue;
                         }
-                        parts.push(drawtext_for(&font_part, text, &wstyle, scale, from, to));
+                        if let Some(enable) = window(from, to) {
+                            parts.push(drawtext_for(&font_part, text, &wstyle, scale, enable));
+                        }
                     }
                 }
                 _ => {}
