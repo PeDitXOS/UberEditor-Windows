@@ -325,3 +325,22 @@ fn denoise_wav_lowers_noise_floor() {
         "noise floor drops ≥ ~9 dB: before {before}, after {after}"
     );
 }
+#[test]
+fn image_stream_yields_continuous_frames() {
+    use std::process::Command;
+    let ffmpeg = ue_media::ffmpeg_bin();
+    if Command::new(&ffmpeg).arg("-version").output().map(|o| !o.status.success()).unwrap_or(true) { return; }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-img-stream");
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = dir.join("still.png");
+    Command::new(&ffmpeg).args(["-y","-v","error","-f","lavfi","-i","color=c=orange:s=640x360","-frames:v","1"]).arg(&img).status().unwrap();
+    assert!(ue_media::is_image_path(&img), "png is an image");
+    // open a session on the still and read many frames — it must NOT end (loop)
+    let mut s = ue_media::stream::MjpegSession::open(&img, 0, 480, 24, None).unwrap();
+    for i in 0..30 {
+        match s.next_frame() {
+            Ok(Some(j)) => assert!(j.len() > 500, "real frame {i}"),
+            other => panic!("image stream ended at frame {i}: {other:?} (would cause a reopen storm)"),
+        }
+    }
+}

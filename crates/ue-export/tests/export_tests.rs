@@ -2011,3 +2011,305 @@ fn avatar_video_generates_from_images_and_videos() {
     let back_px = rgba(2.5, 200, 200);
     assert!(back_px[1] > 90 && back_px[0] < 90, "back to calm: {back_px:?}");
 }
+
+
+/// BUG 2: karaoke paints the active word in `highlight_color`. Realistic
+/// density (3 words/s); exports and checks for the yellow highlight.
+#[test]
+fn karaoke_highlights_the_active_word() {
+    let Some(dir) = media_dir() else { return };
+    let base = dir.join("karaoke_hl.mp4");
+    let st = Command::new(ue_media::ffmpeg_bin())
+        .args(["-y","-v","error","-f","lavfi","-i","color=c=navy:s=1080x1920:d=10:r=30"])
+        .args(["-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p"]).arg(&base).status().unwrap();
+    assert!(st.success());
+    let mut project = Project::new("k");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (1080, 1920);
+    let asset = ue_media::import_file(&base).unwrap();
+    let aid = asset.id;
+    project.assets.push(asset);
+    // 30 words over 10s (3/s), no gaps so they chunk into a couple of phrases
+    let words: Vec<Word> = (0..30).map(|i| {
+        let t = i as i64 * 333_000;
+        Word { text: format!("palabra{i}"), start_us: t, end_us: t + 320_000, confidence: 1.0, rejected: false, display: None }
+    }).collect();
+    let doc = TranscriptDoc {
+        id: Id::new(), asset_id: aid, language: "es".into(), model: "t".into(), words,
+        segments: vec![ue_core::model::Segment { text: "x".into(), start_us: 0, end_us: 10 * SEC, word_range: (0, 30), emotion: None, volume_rms: 0.0 }],
+        global_avg_volume: 0.0,
+    };
+    let doc_id = doc.id;
+    project.transcripts.push(doc);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.name == "V1").unwrap().id;
+    let v2 = seq.tracks.iter().find(|t| t.name == "V2").unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(aid, 0, 10 * SEC, 0), InsertMode::Strict).unwrap();
+    let style = TextStyle { size: 80.0, y_offset: 380.0, highlight_color: Some("#ffcc00".into()), ..Default::default() };
+    store.insert_clip(v2, Clip {
+        id: Id::new(),
+        payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Karaoke },
+        start: 0, duration: 10 * SEC, speed: 1.0, effects: vec![], transform: Default::default(),
+        audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+    }, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-karaoke-hl.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+    assert!(out.exists());
+    // at t=3 s several words have played → yellow highlight (#ffcc00) somewhere
+    // in the caption band (y≈1300 at 1080p→1920)
+    let mut yellow = 0;
+    for y in (1500..1720).step_by(5) {
+        for x in (150..950).step_by(5) {
+            let (r, g, b) = pixel_at_w(&out, 3.0, x, y, 1080);
+            if r > 190 && g > 140 && b < 90 { yellow += 1; }
+        }
+    }
+    assert!(yellow >= 5, "the active word is painted in highlight_color (yellow px={yellow})");
+}
+
+/// BUG 1: a long dense karaoke that used to crash ffmpeg (thousands of
+/// drawtext) now exports a RANGE fine (overlays bounded to the range), and a
+/// FULL export is refused with a clear message instead of a black-box crash.
+#[test]
+fn karaoke_bounds_to_range_and_guards_the_rest() {
+    let Some(dir) = media_dir() else { return };
+    let base = dir.join("karaoke_dense.mp4");
+    let st = Command::new(ue_media::ffmpeg_bin())
+        .args(["-y","-v","error","-f","lavfi","-i","color=c=black:s=1080x1920:d=30:r=30"])
+        .args(["-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p"]).arg(&base).status().unwrap();
+    assert!(st.success());
+    let mut project = Project::new("k");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (1080, 1920);
+    let asset = ue_media::import_file(&base).unwrap();
+    let aid = asset.id;
+    project.assets.push(asset);
+    // 2000 words over 30s — the density that produced ~4000 drawtext and crashed
+    let words: Vec<Word> = (0..2000).map(|i| {
+        let t = i as i64 * 15_000;
+        Word { text: format!("w{i}"), start_us: t, end_us: t + 14_000, confidence: 1.0, rejected: false, display: None }
+    }).collect();
+    let doc = TranscriptDoc {
+        id: Id::new(), asset_id: aid, language: "es".into(), model: "t".into(), words,
+        segments: vec![ue_core::model::Segment { text: "x".into(), start_us: 0, end_us: 30 * SEC, word_range: (0, 2000), emotion: None, volume_rms: 0.0 }],
+        global_avg_volume: 0.0,
+    };
+    let doc_id = doc.id;
+    project.transcripts.push(doc);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.name == "V1").unwrap().id;
+    let v2 = seq.tracks.iter().find(|t| t.name == "V2").unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(aid, 0, 30 * SEC, 0), InsertMode::Strict).unwrap();
+    let style = TextStyle { size: 90.0, y_offset: 380.0, highlight_color: Some("#ffcc00".into()), ..Default::default() };
+    store.insert_clip(v2, Clip {
+        id: Id::new(),
+        payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Karaoke },
+        start: 0, duration: 30 * SEC, speed: 1.0, effects: vec![], transform: Default::default(),
+        audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+    }, InsertMode::Strict).unwrap();
+
+    // a short range is bounded → only ~33 words → succeeds (used to crash)
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-karaoke-bounded.mp4");
+    let _ = std::fs::remove_file(&out);
+    let ranged = ExportSettings { ranges: vec![(0, 500_000)], ..Default::default() };
+    let r = export_sequence(&store.project, seq_id, dir, &out, &ranged);
+    assert!(r.is_ok(), "bounded karaoke range must succeed, got: {r:?}");
+    assert!(out.exists());
+
+    // the full export is refused with a clear message (not a SIGBUS crash)
+    let full = ExportSettings::default();
+    let out2 = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-karaoke-full.mp4");
+    let r2 = export_sequence(&store.project, seq_id, dir, &out2, &full);
+    match r2 {
+        Err(ue_export::ExportError::Ffmpeg(m)) => assert!(m.contains("too large"), "clear guard message: {m}"),
+        other => panic!("expected the size guard to reject the full export, got {other:?}"),
+    }
+}
+
+
+/// An image clip is a still: the paused preview shows it at ANY playhead
+/// position (seeking into a one-frame file used to yield black).
+#[test]
+fn preview_shows_image_clip_at_any_time() {
+    let Some(dir) = media_dir() else { return };
+    let img = dir.join("still_red.png");
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y","-v","error","-f","lavfi","-i","color=c=red:s=800x600","-frames:v","1"]).arg(&img).status().unwrap();
+    let mut project = Project::new("img");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (1280, 720);
+    let mut asset = ue_media::import_file(&img).unwrap();
+    assert_eq!(asset.kind, MediaKind::Image, "png imports as an image");
+    asset.probe.duration_us = 40_000; // a still reports a tiny probe duration
+    let aid = asset.id;
+    project.assets.push(asset);
+    let v1 = project.sequence(seq_id).unwrap().tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    let mut store = ProjectStore::new(project);
+    // 5 s image clip
+    store.insert_clip(v1, Clip::new_media(aid, 0, 5_000_000, 0), InsertMode::Strict).unwrap();
+    // preview at t=3 s (deep inside the clip, past the "one frame") must be red
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, 3_000_000, 640, &[])
+        .expect("compositor ok")
+        .expect("a frame, not None");
+    let f = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-img-preview.jpg");
+    std::fs::write(&f, &jpeg).unwrap();
+    // read a still JPEG WITHOUT -ss (seeking a one-frame file yields nothing);
+    // the preview is 640 wide (canvas 1280x720 → half), centre is red
+    let out = Command::new(ue_media::ffmpeg_bin())
+        .args(["-v", "error", "-i"]).arg(&f)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output().unwrap();
+    let p = out.stdout;
+    let idx = (180usize * 640 + 320) * 3;
+    let (r, g, b) = (p[idx], p[idx + 1], p[idx + 2]);
+    assert!(r > 150 && g < 100 && b < 100, "the image (red) shows at t=3s, not black: rgb({r},{g},{b})");
+}
+
+/// The drop_shadow effect is in the catalog and its split/geq/overlay
+/// filtergraph composes into a real export layer chain without breaking ffmpeg.
+#[test]
+fn drop_shadow_effect_exports_without_error() {
+    let reg = ue_render::core_registry();
+    let def = reg.iter().find(|e| e.id == "core.drop_shadow").expect("drop_shadow is a core effect");
+    assert!(def.params.iter().any(|p| p.key == "margin"), "has the room/margin param");
+    // render_chain emits the split/geq/overlay filtergraph with a UNIQUE label
+    let inst = EffectInstance { effect_id: "core.drop_shadow".into(), enabled: true, params: Default::default(), color_params: Default::default() };
+    let vf = ue_render::render_effect(def, &inst);
+    for f in ["split", "colorchannelmixer", "gblur", "pad", "overlay"] {
+        assert!(vf.contains(f), "the shadow chain uses {f}: {vf}");
+    }
+    assert!(vf.contains("sh") && vf.contains("];["), "unique labelled filtergraph");
+
+    // integration: a PiP clip with the effect exports (the ;-graph composes)
+    let Some(dir) = media_dir() else { return };
+    let base = dir.join("ds_base.mp4");
+    let pip = dir.join("ds_pip.mp4");
+    for (p, c, d) in [(&base, "white", "1"), (&pip, "green", "1")] {
+        Command::new(ue_media::ffmpeg_bin())
+            .args(["-y","-v","error","-f","lavfi","-i",&format!("color=c={c}:s=320x240:d={d}:r=15")])
+            .args(["-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p"]).arg(p).status().unwrap();
+    }
+    let mut project = Project::new("ds");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (640, 480);
+    let ba = ue_media::import_file(&base).unwrap(); let baid = ba.id; project.assets.push(ba);
+    let pa = ue_media::import_file(&pip).unwrap(); let paid = pa.id; project.assets.push(pa);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.name == "V1").unwrap().id;
+    let v2 = seq.tracks.iter().find(|t| t.name == "V2").unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(baid, 0, SEC, 0), InsertMode::Strict).unwrap();
+    let mut clip = Clip::new_media(paid, 0, SEC, 0);
+    clip.transform.scale = (0.5.into(), 0.5.into());
+    clip.effects.push(inst);
+    store.insert_clip(v2, clip, InsertMode::Strict).unwrap();
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-ds-export.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default())
+        .expect("clip with drop_shadow exports");
+    assert!(ue_media::import_file(&out).is_ok(), "the export is a valid video");
+}
+
+/// AUDIT — image over video: the compositor frame (now used by BOTH the paused
+/// preview and live playback) must equal the export frame, pixel for pixel.
+/// Also times the compositor so the playback fps is a known quantity.
+#[test]
+fn audit_image_over_video_preview_equals_export() {
+    let Some(dir) = media_dir() else { return };
+    let vid = dir.join("audit_base.mp4");
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y","-v","error","-f","lavfi","-i","color=c=blue:s=1280x720:d=2:r=30"])
+        .args(["-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p"]).arg(&vid).status().unwrap();
+    let imgp = dir.join("audit_overlay.png");
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y","-v","error","-f","lavfi","-i","color=c=red:s=400x400","-frames:v","1"]).arg(&imgp).status().unwrap();
+
+    let mut project = Project::new("audit");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (1280, 720);
+    let va = ue_media::import_file(&vid).unwrap(); let vaid = va.id; project.assets.push(va);
+    let mut ia = ue_media::import_file(&imgp).unwrap();
+    assert_eq!(ia.kind, MediaKind::Image);
+    ia.probe.duration_us = 40_000;
+    let iaid = ia.id; project.assets.push(ia);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.name == "V1").unwrap().id;
+    let v2 = seq.tracks.iter().find(|t| t.name == "V2").unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(vaid, 0, 2 * SEC, 0), InsertMode::Strict).unwrap();
+    let mut img = Clip::new_media(iaid, 0, 2 * SEC, 0);
+    img.transform.scale = (0.4.into(), 0.4.into());
+    store.insert_clip(v2, img, InsertMode::Strict).unwrap();
+
+    // export → frame at t=1s
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-export.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+    let exp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-exp.png");
+    Command::new(ue_media::ffmpeg_bin()).args(["-y","-v","error","-ss","1","-i"]).arg(&out).args(["-frames:v","1"]).arg(&exp).status().unwrap();
+
+    // compositor (the playback/paused path) → frame at t=1s, TIMED
+    let t0 = std::time::Instant::now();
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, SEC, 1280, &[]).unwrap().unwrap();
+    eprintln!("compositor frame: {} ms (playback ≈ {} fps)", t0.elapsed().as_millis(), 1000 / t0.elapsed().as_millis().max(1));
+    let prev = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-prev.png");
+    std::fs::write(dir.join("audit-prev.jpg"), &jpeg).unwrap();
+    Command::new(ue_media::ffmpeg_bin()).args(["-y","-v","error","-i"]).arg(dir.join("audit-prev.jpg")).args(["-vf","scale=1280:720"]).arg(&prev).status().unwrap();
+
+    let rgb = |f: &Path, x: u32, y: u32| pixel_at_w(f, 0.0, x, y, 1280);
+    // corners = blue base; centre = red image
+    for (x, y, what) in [(40u32,40u32,"corner"),(1240,40,"corner"),(640,360,"centre"),(40,680,"corner")] {
+        let (er,eg,eb) = rgb(&exp,x,y);
+        let (pr,pg,pb) = rgb(&prev,x,y);
+        let d = (er as i32-pr as i32).abs().max((eg as i32-pg as i32).abs()).max((eb as i32-pb as i32).abs());
+        eprintln!("{what} ({x},{y}) export=({er},{eg},{eb}) preview=({pr},{pg},{pb}) d={d}");
+        assert!(d <= 40, "{what} diverges: export=({er},{eg},{eb}) preview=({pr},{pg},{pb})");
+    }
+    // sanity: the composite really has BOTH (blue corner, red centre)
+    let (cr,_,cb) = rgb(&prev,40,40); assert!(cb > 150 && cr < 90, "blue base");
+    let (mr,_,mb) = rgb(&prev,640,360); assert!(mr > 150 && mb < 90, "red image on top");
+}
+
+/// AUDIT — a generator clip (solid) composites identically in the compositor
+/// and the export.
+#[test]
+fn audit_generator_preview_equals_export() {
+    let Some(dir) = media_dir() else { return };
+    let mut project = Project::new("gen");
+    let seq_id = project.active_sequence;
+    project.sequence_mut(seq_id).unwrap().resolution = (960, 540);
+    let v1 = project.sequence(seq_id).unwrap().tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    let mut store = ProjectStore::new(project);
+    // a solid gradient generator filling the frame
+    let mut clip = Clip::new_generator("core.solid", 0, 2 * SEC);
+    if let ClipPayload::Generator { color_params, .. } = &mut clip.payload {
+        color_params.insert("color".into(), "#33cc66".into());
+    }
+    store.insert_clip(v1, clip, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-gen.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+    let exp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-gen-exp.png");
+    Command::new(ue_media::ffmpeg_bin()).args(["-y","-v","error","-ss","1","-i"]).arg(&out).args(["-frames:v","1"]).arg(&exp).status().unwrap();
+
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, SEC, 960, &[]).unwrap().unwrap();
+    let prev = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-audit-gen-prev.png");
+    std::fs::write(dir.join("audit-gen-prev.jpg"), &jpeg).unwrap();
+    Command::new(ue_media::ffmpeg_bin()).args(["-y","-v","error","-i"]).arg(dir.join("audit-gen-prev.jpg")).args(["-vf","scale=960:540"]).arg(&prev).status().unwrap();
+
+    let (er,eg,eb) = pixel_at_w(&exp, 0.0, 480, 270, 960);
+    let (pr,pg,pb) = pixel_at_w(&prev, 0.0, 480, 270, 960);
+    eprintln!("generator export=({er},{eg},{eb}) preview=({pr},{pg},{pb})");
+    let d = (er as i32-pr as i32).abs().max((eg as i32-pg as i32).abs()).max((eb as i32-pb as i32).abs());
+    assert!(d <= 30, "generator diverges: export=({er},{eg},{eb}) preview=({pr},{pg},{pb})");
+    assert!(eg > 150 && er < 120, "the green generator actually rendered");
+}

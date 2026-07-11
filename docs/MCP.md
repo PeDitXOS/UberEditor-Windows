@@ -182,8 +182,10 @@ Keys are sorted and de-duplicated on write.
 
 Transform patch keys: `position_x/y`, `scale_x/y`, `rotation` (degrees),
 `opacity` (0..1), `crop_left/top/right/bottom` (0..1), `flip_h`, `flip_v`.
-`position` is in **pixels from the canvas centre**; `y_offset` (in `style`) is
-in **pixels from the bottom** — positive moves the caption up.
+`position` is in **pixels from the canvas centre**. `y_offset` (in `style`) is
+**pixels DOWN from the frame's vertical centre**, at a 1080p reference (scaled
+to the output — about 1.8 px per unit on a 1080×1920 vertical). Larger = lower,
+negative = higher; the subtitle default (~380) lands in the lower third.
 
 **`set_clip_content`** edits what a clip *shows*, depending on its payload: the
 words and style of a Text clip, the style and `subtitles_mode` of a Subtitles
@@ -273,18 +275,21 @@ instead of handing back a black frame.
 | `playback {action: play\|pause\|seek\|position}` | drives the real player |
 | `export_video` | the export |
 
-**The paused preview matches the export frame for frame.** `debug_render_frame`
-composites every active video layer (base + overlays), each clip's transform
-and effects, and the titles/subtitles — the same way the export burns them in,
-verified pixel-for-pixel (`preview_matches_export_pixel_for_pixel`). So it's a
-faithful way to check a composition without a full render.
+**One renderer for everything.** The paused preview AND live playback both go
+through the same single-frame compositor, which is verified pixel-for-pixel
+against the export (video layers, images, generators, transforms, effects,
+titles and subtitles). So paused, playing and the export show the same thing —
+`debug_render_frame` is a faithful check of a composition without a full
+render. (Live playback spawns one ffmpeg per frame, so a heavy composite plays
+at ~10–15 fps — correct, not smooth.)
 
 A **generated avatar is just normal media**: `generate_avatar_video` renders a
 `.mov` and imports it into the pool, so once it's on the timeline it's an
 ordinary video clip — composited 1:1 like any other. (The legacy live-reactive
-`Avatar` clip type is deprecated and not shown in the preview; use the
-generate-then-place flow.) The one remaining exception is **karaoke**, which
-shows the phrase line without the per-word highlight in preview.
+`Avatar` clip type is deprecated.) Two known preview↔export exceptions remain:
+**karaoke** shows the phrase line without the per-word highlight, and
+**transitions** (cross-fades) blend only in the export, not in the single-frame
+preview.
 
 ---
 

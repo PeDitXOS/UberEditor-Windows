@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use ue_core::model::{ClipPayload, EffectInstance, Id, Project, TrackKind, Transform2D};
+use ue_core::model::{ClipPayload, EffectInstance, Id, MediaKind, Project, TrackKind, Transform2D};
 use ue_core::TimeUs;
 
 use crate::{ffmpeg_bin, MediaError, MediaResult};
@@ -37,8 +37,15 @@ pub fn resolve_top_video(project: &Project, sequence_id: Id, t_us: TimeUs) -> Op
             if clip.start <= t_us && t_us < clip.end() {
                 if let ClipPayload::Media { asset_id, src_in, .. } = &clip.payload {
                     let asset = project.asset(*asset_id)?;
-                    let src_t = *src_in
-                        + ((t_us - clip.start) as f64 * clip.speed).round() as TimeUs;
+                    // an image is a still: the SAME frame regardless of the
+                    // playhead, so its source time never advances (seeking past
+                    // a one-frame file would just yield black and, live, a
+                    // reopen-per-tick storm).
+                    let src_t = if asset.kind == MediaKind::Image {
+                        0
+                    } else {
+                        *src_in + ((t_us - clip.start) as f64 * clip.speed).round() as TimeUs
+                    };
                     // preview: prefer the proxy (lighter to decode);
                     // export always uses the original
                     let path = asset

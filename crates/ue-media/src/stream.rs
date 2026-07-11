@@ -30,14 +30,23 @@ impl MjpegSession {
         fps: u32,
         extra_vf: Option<&str>,
     ) -> MediaResult<Self> {
-        let ss = format!("{:.6}", start_src_us as f64 / 1_000_000.0);
         let base = format!("fps={fps},scale='min({max_width},iw)':-2");
         let vf = match extra_vf {
             Some(chain) if !chain.is_empty() => format!("{chain},{base}"),
             _ => base,
         };
-        let mut child = Command::new(ffmpeg_bin())
-            .args(["-v", "error", "-ss", &ss, "-i"])
+        // A still image has one frame: loop it (so the stream never ends and
+        // playback/effects run over it) and never seek into it — `-ss` past a
+        // one-frame file yields nothing and, live, reopens every tick.
+        let image = crate::is_image_path(path);
+        let ss = if image { "0".to_string() } else { format!("{:.6}", start_src_us as f64 / 1_000_000.0) };
+        let mut cmd = Command::new(ffmpeg_bin());
+        cmd.args(["-v", "error"]);
+        if image {
+            cmd.args(["-loop", "1", "-framerate", &fps.to_string()]);
+        }
+        let mut child = cmd
+            .args(["-ss", &ss, "-i"])
             .arg(path)
             .args(["-an", "-vf", &vf, "-f", "mjpeg", "-q:v", "6", "pipe:1"])
             .stdout(Stdio::piped())

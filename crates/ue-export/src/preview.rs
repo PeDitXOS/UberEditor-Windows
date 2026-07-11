@@ -86,7 +86,12 @@ pub fn render_preview_frame(
                 let Some(asset) = project.asset(*asset_id) else {
                     return Err(ExportError::MissingAsset(*asset_id));
                 };
-                let src_time = *src_in + (rel as f64 * clip.speed).round() as TimeUs;
+                // a still image holds one frame: never seek into it
+                let src_time = if asset.kind == ue_core::model::MediaKind::Image {
+                    0
+                } else {
+                    *src_in + (rel as f64 * clip.speed).round() as TimeUs
+                };
                 layers.push(ActiveLayer {
                     source: LayerSource::Media {
                         path: resolve_path_pub(base_dir, &asset.path),
@@ -121,6 +126,12 @@ pub fn render_preview_frame(
     for layer in &layers {
         match &layer.source {
             LayerSource::Media { path, src_time } => {
+                // a still image is one frame: loop it so the `fps` filter in
+                // the base norm has frames to resample (otherwise a base image
+                // renders black). Also never seek into it.
+                if ue_media::is_image_path(path) {
+                    args.extend(["-loop".into(), "1".into()]);
+                }
                 // input-side seek: fast, and frame-close (keyframe) is fine for
                 // a paused preview
                 args.push("-ss".into());

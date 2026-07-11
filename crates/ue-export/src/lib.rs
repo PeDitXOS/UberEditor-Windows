@@ -98,6 +98,49 @@ pub fn export_sequence(
     export_sequence_with_progress(project, sequence_id, base_dir, output, settings, |_| {}, &never)
 }
 
+/// A useful error when ffmpeg fails: the exit code OR the killing signal (a
+/// crash flushes no stderr, so an empty message used to be a black box), the
+/// stderr when present, and the full command dumped to a temp file so the
+/// exact filter_complex can be inspected.
+fn describe_failure(status: &std::process::ExitStatus, stderr: &str, args: &[String]) -> String {
+    let mut msg = match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                match status.signal() {
+                    Some(sig) => format!(
+                        "killed by signal {sig} — a crash; the filtergraph may be too large"
+                    ),
+                    None => "terminated abnormally".to_string(),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                "terminated abnormally".to_string()
+            }
+        }
+    };
+    if stderr.is_empty() {
+        let cmd = std::env::temp_dir().join("ue_ffmpeg_last_command.txt");
+        let _ = std::fs::write(&cmd, args.join("\n"));
+        let fc_len = args
+            .iter()
+            .position(|a| a == "-filter_complex")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        msg.push_str(&format!(
+            "; no stderr. filter_complex is {fc_len} bytes; full command written to {}",
+            cmd.display()
+        ));
+    } else {
+        msg.push_str(&format!(":\n{stderr}"));
+    }
+    msg
+}
+
 /// Export with progress (0..1) and cooperative cancellation.
 /// On cancel, ffmpeg is killed and the partial file is removed.
 pub fn export_sequence_with_progress(
@@ -157,7 +200,7 @@ pub fn export_sequence_with_progress(
         return Err(ExportError::Cancelled);
     }
     if !status.success() {
-        return Err(ExportError::Ffmpeg(err_text.trim().to_string()));
+        return Err(ExportError::Ffmpeg(describe_failure(&status, err_text.trim(), &args)));
     }
     on_progress(1.0);
     Ok(())

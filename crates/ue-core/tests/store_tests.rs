@@ -695,3 +695,29 @@ fn duplicate_curve_keys_are_sanitized_not_fatal() {
     assert_eq!(keys[1].value, 90.0, "last write wins");
     assert!(ue_core::validate::validate(&store.project).is_empty(), "invariants hold");
 }
+
+/// Regression: an IMAGE clip holds for any duration — adding one (default 5 s)
+/// must not trip the "src_out > asset duration" invariant, since a still's
+/// probe duration is a single tiny frame.
+#[test]
+fn image_clip_can_be_longer_than_its_probe_duration() {
+    use ue_core::model::*;
+    use ue_core::ops::InsertMode;
+    let mut project = Project::new("img");
+    let seq_id = project.active_sequence;
+    // a still: 40 ms "duration" like ffprobe reports for a PNG
+    let img = MediaAsset {
+        id: Id::new(), kind: MediaKind::Image, path: "pic.png".into(), content_hash: "h".into(),
+        probe: ProbeInfo { duration_us: 40_000, fps: None, width: 1920, height: 1080, rotation: 0,
+            vcodec: None, acodec: None, audio_channels: 0, vfr: false },
+        proxy: None, audio_conform: None, peaks: None, thumbnails: None, transcript: None, offline: false,
+    };
+    let aid = img.id;
+    project.assets.push(img);
+    let v1 = project.sequence(seq_id).unwrap().tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    let mut store = ue_core::ProjectStore::new(project);
+    // 5 s image clip: src_out (5_000_000) >> probe (40_000) — must be allowed
+    let clip = Clip::new_media(aid, 0, 5_000_000, 0);
+    store.insert_clip(v1, clip, InsertMode::Strict).expect("adding a 5 s image clip must succeed");
+    assert!(ue_core::validate::validate(&store.project).is_empty(), "no invariant violations");
+}

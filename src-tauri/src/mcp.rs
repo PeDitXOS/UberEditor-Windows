@@ -498,7 +498,9 @@ fn tool_defs() -> Value {
                         "stroke_width": num("outline width in px"),
                         "highlight_color": { "description": "karaoke highlight colour, or null", "anyOf": [{"type":"null"},{"type":"string"}] },
                         "x_offset": num("px from the horizontal anchor"),
-                        "y_offset": num("px from the bottom"),
+                        "y_offset": num("vertical position: px DOWN from the frame's centre, at a \
+                            1080p reference (scaled to the output, ~1.8 px/unit on a 1080x1920 \
+                            vertical). Larger = lower, negative = higher; ~380 sits in the lower third"),
                         "align": str_("'left' | 'center' | 'right'"),
                     }
                 },

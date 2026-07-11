@@ -409,9 +409,15 @@ pub fn trim_clip(project: &Project, clip_id: Id, left: bool, new_edge: TimeUs) -
     Ok(plan.finish())
 }
 
+/// Source material bound for trimming. `None` = unbounded: images are stills
+/// that hold for any length, so a clip on one can be trimmed out freely.
 fn asset_duration(project: &Project, clip: &Clip) -> Option<TimeUs> {
     if let ClipPayload::Media { asset_id, .. } = &clip.payload {
-        project.asset(*asset_id).map(|a| a.probe.duration_us)
+        match project.asset(*asset_id) {
+            Some(a) if a.kind == MediaKind::Image => None,
+            Some(a) => Some(a.probe.duration_us),
+            None => None,
+        }
     } else {
         None
     }

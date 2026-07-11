@@ -14,7 +14,6 @@ use ue_audio::player::Player;
 use ue_core::model::{AudioProps, Clip, Id, MediaKind, Project, TrackKind, Transform2D};
 use ue_core::ops::InsertMode;
 use ue_core::{dlog, ProjectStore, TimeUs};
-use ue_media::stream::MjpegSession;
 
 pub mod mcp;
 
@@ -171,7 +170,6 @@ pub struct FrameService {
     pub running: Arc<AtomicBool>,
 }
 
-const PLAYBACK_FPS: u32 = 24;
 const PLAYBACK_MAX_W: u32 = 960;
 
 /// Stable identity of a playback stream: same clip content + composition ⇒
@@ -209,12 +207,13 @@ pub fn should_reuse_session(
 }
 
 fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, running: Arc<AtomicBool>) {
-    let mut session: Option<MjpegSession> = None;
-    // Session identity = the DATA that defines the stream, never the vf
-    // string: transform_vf embeds unique graph labels (p0fg, p1fg, …) so the
-    // string differs on every build — comparing it reopened the session on
-    // every tick (field bug: black playback whenever a transform was active).
-    let mut session_key: Option<String> = None;
+    // ONE rendering path: playback composites each frame with the SAME
+    // compositor the paused preview uses (render_preview_frame), which is
+    // verified pixel-for-pixel against the export. So paused, playing and the
+    // export all show exactly the same thing — every video layer, images,
+    // generators, titles and subtitles — instead of the old single-top-clip
+    // stream that diverged from all of them. It spawns one ffmpeg per frame, so
+    // playback of a heavy composite is not 60 fps, but it is CORRECT.
     while running.load(Ordering::SeqCst) {
         let state = app.state::<AppState>();
         let (t, playing) = {
@@ -227,95 +226,34 @@ fn frame_service_loop(app: tauri::AppHandle, latest: Arc<Mutex<Vec<u8>>>, runnin
         if !playing {
             break;
         }
-        let resolved = {
+        // snapshot everything the compositor needs, then release the lock
+        // before ffmpeg runs (never hold the store across a subprocess)
+        let (project, seq_id, base_dir, packs) = {
             let store = state.store.lock().unwrap();
-            ue_media::frame::resolve_top_video(
-                &store.project,
+            let base = state
+                .path
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            (
+                store.project.clone(),
                 store.project.active_sequence,
-                t,
+                base,
+                state.user_packs.lock().unwrap().clone(),
             )
         };
-        let Some(r) = resolved else {
-            latest.lock().unwrap().clear();
-            session = None;
-            std::thread::sleep(Duration::from_millis(40));
-            continue;
-        };
-        let path = PathBuf::from(&r.asset_path);
-        let src_t = r.src_t_us;
-        let reg = state.registry.lock().unwrap().clone();
-        let canvas = {
-            let store = state.store.lock().unwrap();
-            store
-                .project
-                .sequence(store.project.active_sequence)
-                .map(|s| s.resolution)
-        };
-        let key = playback_session_key(&r, canvas);
-
-        // is the current session usable? (same file, same effect chain,
-        // position reachable going forward)
-        let reusable = should_reuse_session(
-            session.as_ref().map(|s| (s.asset_path.as_path(), s.next_src_us())),
-            session_key.as_deref() == Some(key.as_str()),
-            &path,
-            src_t,
-        );
-        if !reusable {
-            let reason = match session.as_ref() {
-                None => "no session".to_string(),
-                Some(s) if s.asset_path != path => "clip changed".to_string(),
-                Some(_) if session_key.as_deref() != Some(key.as_str()) => {
-                    "effects/transform changed".to_string()
-                }
-                Some(s) => format!(
-                    "seek (stream at {:.3}s)",
-                    s.next_src_us() as f64 / 1e6
-                ),
-            };
-            dlog(
-                "frame",
-                &format!(
-                    "open session {} @ {:.3}s ({reason})",
-                    path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-                    src_t as f64 / 1e6,
-                ),
-            );
-            // the stream runs with -ss: t=0 at the open point, at SOURCE
-            // rate → clip time = t/speed + offset_at_open. This way the
-            // transform curves ANIMATE during playback too.
-            let rel0 = r.clip_rel_us as f64 / 1_000_000.0;
-            let tvar = if (r.speed - 1.0).abs() > 1e-9 {
-                format!("(t/{}+{rel0:.6})", r.speed)
-            } else {
-                format!("(t+{rel0:.6})")
-            };
-            let open_vf = ue_render::clip_vf_at(&reg, &r.effects, &r.transform, canvas, &tvar);
-            session =
-                MjpegSession::open(&path, src_t, PLAYBACK_MAX_W, PLAYBACK_FPS, open_vf.as_deref())
-                    .ok();
-            session_key = Some(key);
+        match ue_export::preview::render_preview_frame(
+            &project, seq_id, &base_dir, t, PLAYBACK_MAX_W, &packs,
+        ) {
+            Ok(Some(jpeg)) => *latest.lock().unwrap() = jpeg,
+            Ok(None) => latest.lock().unwrap().clear(), // nothing on screen (matches export: black)
+            Err(e) => dlog("frame", &format!("playback compositor @ {:.3}s: {e}", t as f64 / 1e6)),
         }
-        if let Some(s) = session.as_mut() {
-            let mut newest: Option<Vec<u8>> = None;
-            let mut dead = false;
-            while s.next_src_us() <= src_t {
-                match s.next_frame() {
-                    Ok(Some(f)) => newest = Some(f),
-                    _ => {
-                        dead = true;
-                        break;
-                    }
-                }
-            }
-            if dead {
-                session = None;
-            }
-            if let Some(f) = newest {
-                *latest.lock().unwrap() = f;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(1000 / PLAYBACK_FPS as u64 / 2));
+        // the compositor itself paces the loop (each frame is real work); a
+        // small yield keeps it from busy-spinning if a frame is ever cheap
+        std::thread::sleep(Duration::from_millis(8));
     }
     running.store(false, Ordering::SeqCst);
 }

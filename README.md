@@ -93,7 +93,7 @@ The animation looks **the same when paused, playing, and in the export** (same c
 
 ## Effects (modular packs)
 
-`Inspector → Effects → + Add effect`. Included: **Chroma Key**, Color correction, Gaussian blur, and Vertical: blurred background. Each effect comes from a `manifest.json` (parameters + ffmpeg template), so preview and export use exactly the same chain.
+`Inspector → Effects → + Add effect`. Included: **Chroma Key**, Color correction, Gaussian blur, **Drop shadow** (soft offset shadow — great on a PiP/overlay to lift it off the background), and Vertical: blurred background. Each effect comes from a `manifest.json` (parameters + ffmpeg template), so preview and export use exactly the same chain.
 
 **Your own packs**: create a folder at `«app config»/effects/<my-effect>/manifest.json` and press `↻ packs`. An invalid manifest breaks nothing (it's reported) and a pack with the same `id` as a core one replaces it.
 

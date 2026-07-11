@@ -580,6 +580,7 @@ fn karaoke_overlays(
     fallback_font: &str,
     scale: f64,
     out_w: u32,
+    export_windows: &[(TimeUs, TimeUs)],
 ) -> Option<Vec<String>> {
     let font_part = font_part_for(style, fallback_font);
     let font_path = font_part.strip_prefix("fontfile=")?.to_string();
@@ -619,6 +620,11 @@ fn karaoke_overlays(
         if seg_to <= seg_from {
             continue;
         }
+        // only phrases inside the rendered ranges: keeps the per-word drawtext
+        // (two per word) bounded so ffmpeg doesn't choke on a long transcript
+        if !in_export_windows(seg_from, seg_to, export_windows) {
+            continue;
+        }
         // line layout: per-word widths + spaces
         let widths: Vec<f64> = words
             .iter()
@@ -650,13 +656,27 @@ fn karaoke_overlays(
 
 /// drawtext chain for the sequence's titles and automatic subtitles, burned
 /// into the export. Size/offset are referenced to 1080p and scaled to `out_h`.
+///
+/// `export_windows` are the timeline ranges actually being rendered (from
+/// `ranges`/`range`; empty = the whole timeline). Overlays outside every
+/// window are skipped: they'd be trimmed away anyway, and for karaoke — which
+/// emits two drawtext PER WORD — this keeps the filtergraph from exploding
+/// (a full-transcript karaoke export produced ~4000 drawtext / ~900 KB and
+/// crashed ffmpeg; a 20 s range now emits a few dozen).
 fn build_text_overlays(
     project: &Project,
     seq: &ue_core::model::Sequence,
     out_h: u32,
     out_w: u32,
+    export_windows: &[(TimeUs, TimeUs)],
 ) -> Option<String> {
-    text_overlays_inner(project, seq, out_h, out_w, None)
+    text_overlays_inner(project, seq, out_h, out_w, None, export_windows)
+}
+
+/// Does `[from, to)` overlap any export window? (Empty windows = whole timeline,
+/// so everything overlaps.)
+fn in_export_windows(from: TimeUs, to: TimeUs, windows: &[(TimeUs, TimeUs)]) -> bool {
+    windows.is_empty() || windows.iter().any(|&(a, b)| from < b && to > a)
 }
 
 /// drawtext chain for the titles/subtitles ACTIVE at timeline time `t_us`,
@@ -675,17 +695,19 @@ pub fn text_overlays_at(
     out_w: u32,
     t_us: TimeUs,
 ) -> Option<String> {
-    text_overlays_inner(project, seq, out_h, out_w, Some(t_us))
+    text_overlays_inner(project, seq, out_h, out_w, Some(t_us), &[])
 }
 
 /// Shared body: `at = None` burns the whole timeline in (export); `at = Some(t)`
 /// emits only what is on screen at `t`, without enable clauses (preview).
+/// `export_windows` bounds the export path to the ranges being rendered.
 fn text_overlays_inner(
     project: &Project,
     seq: &ue_core::model::Sequence,
     out_h: u32,
     out_w: u32,
     at: Option<TimeUs>,
+    export_windows: &[(TimeUs, TimeUs)],
 ) -> Option<String> {
     use ue_core::model::{ClipPayload, SubtitleMode, TrackKind};
     let scale = out_h as f64 / 1080.0;
@@ -695,8 +717,12 @@ fn text_overlays_inner(
     };
     // for an item spanning [from, to): the enable window (export) or, in
     // preview mode, `Some(None)` when it is on screen at `t` and `None` when
-    // it is not (so the caller skips it).
+    // it is not (so the caller skips it). In export it also skips anything
+    // outside the rendered ranges.
     let window = |from: TimeUs, to: TimeUs| -> Option<Option<(TimeUs, TimeUs)>> {
+        if at.is_none() && !in_export_windows(from, to, export_windows) {
+            return None;
+        }
         match at {
             None => Some(Some((from, to))),
             Some(t) if from <= t && t < to => Some(None),
@@ -725,9 +751,9 @@ fn text_overlays_inner(
                     // (progressive fill); needs font metrics. Export only —
                     // the preview falls through to the phrase line below.
                     if *mode == SubtitleMode::Karaoke && at.is_none() {
-                        if let Some(chains) =
-                            karaoke_overlays(seq, doc, clip, style, &font_part, scale, out_w)
-                        {
+                        if let Some(chains) = karaoke_overlays(
+                            seq, doc, clip, style, &font_part, scale, out_w, export_windows,
+                        ) {
                             parts.extend(chains);
                             continue;
                         }
@@ -1066,8 +1092,28 @@ pub fn build_ffmpeg_args(
         current = "flat".to_string();
     }
 
-    // burn titles and subtitles onto the combined video
-    let text_chain = build_text_overlays(project, seq, out_h, out_w);
+    // burn titles and subtitles onto the combined video, bounded to the ranges
+    // actually being rendered (a full-transcript karaoke would otherwise emit
+    // thousands of drawtext and crash ffmpeg)
+    let export_windows: Vec<(TimeUs, TimeUs)> = if !settings.ranges.is_empty() {
+        settings.ranges.clone()
+    } else {
+        settings.range.into_iter().collect()
+    };
+    let text_chain = build_text_overlays(project, seq, out_h, out_w, &export_windows);
+    // guard: even bounded, a very long single range of dense karaoke could grow
+    // the filtergraph past what ffmpeg can parse (~900 KB crashed it). Fail with
+    // a clear message instead of a black-box crash.
+    if let Some(chain) = &text_chain {
+        const MAX_TEXT_FILTER: usize = 400_000;
+        if chain.len() > MAX_TEXT_FILTER {
+            return Err(ExportError::Ffmpeg(format!(
+                "the subtitle filtergraph is too large ({} KB): export a shorter range, \
+                 or use 'phrase'/'word' subtitles instead of 'karaoke'",
+                chain.len() / 1000
+            )));
+        }
+    }
     match text_chain {
         Some(chain) => fc.push(format!("[{current}]{chain}[vout]")),
         None => fc.push(format!("[{current}]null[vout]")),
@@ -1226,6 +1272,12 @@ pub fn build_ffmpeg_args(
     // ---- command line ----
     let mut args: Vec<String> = vec!["-y".into(), "-v".into(), "error".into()];
     for input in &inputs {
+        // a still image is one frame: loop it so it produces frames for the
+        // whole clip. Without this a trim/overlay only saw a single frame and
+        // the image flashed for ~one frame then vanished (base OR layer).
+        if ue_media::is_image_path(input) {
+            args.extend(["-loop".into(), "1".into()]);
+        }
         args.push("-i".into());
         args.push(input.to_string_lossy().into_owned());
     }

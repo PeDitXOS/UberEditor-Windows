@@ -91,6 +91,15 @@ pub fn conform_audio(src: &Path, out: &Path) -> MediaResult<()> {
 /// Default duration of a still-image clip.
 pub const IMAGE_CLIP_DURATION_US: i64 = 5_000_000;
 
+/// Is this path a still image (by extension)? Stills need `-loop 1` and no
+/// seeking in the decoders.
+pub fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "tiff" | "tif" | "gif" | "heic")
+    )
+}
+
 pub fn default_clip_duration(asset: &MediaAsset) -> i64 {
     match asset.kind {
         MediaKind::Image => IMAGE_CLIP_DURATION_US,

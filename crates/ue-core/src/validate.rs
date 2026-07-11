@@ -70,7 +70,13 @@ pub fn validate(project: &Project) -> Vec<String> {
                     match project.asset(*asset_id) {
                         None => issues.push(format!("clip {}: asset {asset_id} does not exist", clip.id)),
                         Some(a) => {
-                            if *src_out > a.probe.duration_us && a.probe.duration_us > 0 {
+                            // Images are stills: they hold for ANY duration, so
+                            // their src window is not bounded by the probe
+                            // (a single frame reports a tiny duration).
+                            if a.kind != MediaKind::Image
+                                && *src_out > a.probe.duration_us
+                                && a.probe.duration_us > 0
+                            {
                                 issues.push(format!(
                                     "clip {}: src_out {} > asset duration {}",
                                     clip.id, src_out, a.probe.duration_us
