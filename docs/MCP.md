@@ -171,7 +171,8 @@ set_clip_properties {
   },
   "audio": { "gain_db": -6, "denoise": true },
   "effects": [{ "effect_id": "core.blur", "params": { "sigma": 8 } }],
-  "transition_in": { "duration_us": 500000 },  // null removes it
+  "transition_in": { "duration_us": 500000 },   // null removes it; always runs
+  "transition_out": { "duration_us": 500000 },  // exit to black/transparent
   "speed": 1.5                                  // pitch preserved
 }
 ```
@@ -303,7 +304,9 @@ A **generated avatar is just normal media**: `generate_avatar_video` renders a
 ordinary video clip — composited 1:1 like any other. (The legacy live-reactive
 `Avatar` clip type is deprecated.) Two known preview↔export exceptions remain:
 **karaoke** shows the phrase line without the per-word highlight, and
-**transitions** (cross-fades) blend only in the export, not in the single-frame
+**transitions**: playback approximates dissolve/pixelize as a fade (wipes,
+slides, circles and radial render their real pattern); pause and the export
+always show the exact
 preview.
 
 ---

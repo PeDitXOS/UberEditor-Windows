@@ -35,7 +35,13 @@ pub enum Action {
     SetClipTransform { clip_id: Id, transform: Transform2D },
     SetClipAudio { clip_id: Id, audio: AudioProps },
     SetClipEffects { clip_id: Id, effects: Vec<EffectInstance> },
-    SetClipTransition { clip_id: Id, transition: Option<TransitionRef> },
+    SetClipTransition {
+        clip_id: Id,
+        transition: Option<TransitionRef>,
+        /// false = transition_in (entrance), true = transition_out (exit).
+        #[serde(default)]
+        out: bool,
+    },
     /// Changes the content and style of a text clip (Text payload).
     SetClipText { clip_id: Id, content: String, style: TextStyle },
     SetClipGenerator {
@@ -532,13 +538,14 @@ pub fn apply(project: &mut Project, action: Action) -> UeResult<Action> {
             Ok(Action::SetActiveSequence { sequence_id: old })
         }
 
-        Action::SetClipTransition { clip_id, transition } => {
+        Action::SetClipTransition { clip_id, transition, out } => {
             let (si, ti, ci) = project
                 .locate_clip(clip_id)
                 .ok_or_else(|| UeError::NotFound(format!("clip {clip_id}")))?;
             let clip = &mut project.sequences[si].tracks[ti].clips[ci];
-            let old = std::mem::replace(&mut clip.transition_in, transition);
-            Ok(Action::SetClipTransition { clip_id, transition: old })
+            let slot = if out { &mut clip.transition_out } else { &mut clip.transition_in };
+            let old = std::mem::replace(slot, transition);
+            Ok(Action::SetClipTransition { clip_id, transition: old, out })
         }
     }
 }

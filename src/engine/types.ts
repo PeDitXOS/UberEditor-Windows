@@ -318,6 +318,7 @@ export interface Clip {
   transform: Transform2D;
   audio: AudioProps;
   transition_in: TransitionRef | null;
+  transition_out: TransitionRef | null;
   label_color: string | null;
   /** linked clips (video+audio from the same media) share a group */
   group: Id | null;

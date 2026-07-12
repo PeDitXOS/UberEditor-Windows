@@ -100,20 +100,24 @@ export function MediaPool() {
               )}
             </div>
             {a.probe.audio_channels > 0 &&
-              (a.transcript ? (
-                <span
-                  className="shrink-0 rounded bg-clip-audio px-1.5 py-0.5 font-[var(--font-mono)] text-[9px] text-clip-audio-hi"
-                  title="Word-level transcript ready"
-                >
-                  T✓
-                </span>
-              ) : transcribingIds.includes(a.id) ? (
+              (transcribingIds.includes(a.id) ? (
                 <span
                   className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
                   title="Transcribing in the background…"
                 >
                   ⏳
                 </span>
+              ) : a.transcript ? (
+                <button
+                  className="focus-ring shrink-0 rounded bg-clip-audio px-1.5 py-0.5 font-[var(--font-mono)] text-[9px] text-clip-audio-hi hover:brightness-125"
+                  title="Word-level transcript ready — click to re-transcribe with the current AI · Whisper model (replaces it; subtitles keep working)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void transcribeAsset(a.id);
+                  }}
+                >
+                  T✓ ↻
+                </button>
               ) : (
                 <button
                   className="focus-ring shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-dim hover:border-accent/60 hover:text-accent"

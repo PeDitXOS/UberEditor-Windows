@@ -96,7 +96,7 @@ export interface UiState {
     colorParams: Record<string, string>,
   ) => Promise<void>;
   setClipEffects: (clipId: Id, effects: EffectInstance[]) => Promise<void>;
-  setClipTransition: (clipId: Id, transition: TransitionRef | null) => Promise<void>;
+  setClipTransition: (clipId: Id, transition: TransitionRef | null, out?: boolean) => Promise<void>;
   reloadEffectPacks: () => Promise<void>;
   addTextClip: () => Promise<void>;
   removeSilences: (
@@ -495,8 +495,8 @@ export const useStore = create<UiState>((set, get) => {
       ),
     setClipEffects: (clipId, effects) =>
       run("Edit effects", () => engine.setClipEffects(clipId, effects)),
-    setClipTransition: (clipId, transition) =>
-      run("Edit transition", () => engine.setClipTransition(clipId, transition)),
+    setClipTransition: (clipId, transition, out) =>
+      run("Edit transition", () => engine.setClipTransition(clipId, transition, out)),
 
     moveTimelineRange: async (fromUs, toUs, destUs) => {
       const seqId = activeSequence(get().project).id;

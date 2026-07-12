@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { AvatarConfig, AvatarExpression, Id } from "../engine/types";
 import { assetName, newAvatarConfig } from "../engine/types";
 import { engine, useStore } from "../state/store";
+import { Slider } from "./Slider";
 
 const inputCls =
   "focus-ring min-w-0 flex-1 rounded-md border border-line bg-bg2 px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint";
@@ -289,32 +290,24 @@ export function AvatarDialog() {
           <section className="rounded-lg border border-line-soft bg-bg2/40 p-2.5">
             <h3 className="panel-eyebrow mb-1.5">Look</h3>
             <Field label="Size">
-              <input
-                type="range"
-                className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
-                min={0.05}
-                max={1}
-                step={0.05}
-                value={draft.scale}
-                onChange={(e) => patch({ scale: Number(e.target.value) })}
+              <Slider
+                value={draft.scale * 100}
+                min={5}
+                max={100}
+                step={5}
+                unit="%"
+                onChange={(v) => patch({ scale: Math.min(4, Math.max(0.01, v / 100)) })}
               />
-              <span className="w-12 shrink-0 text-right font-[var(--font-mono)] text-[11px] text-ink">
-                {Math.round(draft.scale * 100)}%
-              </span>
             </Field>
             <Field label="Shake" hint="How much the avatar bounces with your voice">
-              <input
-                type="range"
-                className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
+              <Slider
+                value={draft.shake_factor}
                 min={0}
                 max={3}
                 step={0.1}
-                value={draft.shake_factor}
-                onChange={(e) => patch({ shake_factor: Number(e.target.value) })}
+                unit="×"
+                onChange={(v) => patch({ shake_factor: Math.max(0, v) })}
               />
-              <span className="w-12 shrink-0 text-right font-[var(--font-mono)] text-[11px] text-ink">
-                {draft.shake_factor.toFixed(1)}×
-              </span>
             </Field>
           </section>
 

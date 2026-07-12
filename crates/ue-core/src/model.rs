@@ -380,6 +380,10 @@ pub struct Clip {
     pub audio: AudioProps,
     #[serde(default)]
     pub transition_in: Option<TransitionRef>,
+    /// Exit transition over the clip's tail (to black on the base track,
+    /// to transparent on upper layers).
+    #[serde(default)]
+    pub transition_out: Option<TransitionRef>,
     #[serde(default)]
     pub label_color: Option<String>,
     /// Optional human-friendly name (agents/users; the UI and MCP fall back to
@@ -443,6 +447,7 @@ impl Clip {
             transform: Transform2D::default(),
             audio: AudioProps::default(),
             transition_in: None,
+            transition_out: None,
             label_color: None,
             name: None,
             group: None,
@@ -464,6 +469,7 @@ impl Clip {
             transform: Default::default(),
             audio: AudioProps { muted: true, ..Default::default() },
             transition_in: None,
+            transition_out: None,
             label_color: None,
             name: None,
             group: None,
@@ -481,6 +487,7 @@ impl Clip {
             transform: Transform2D::default(),
             audio: AudioProps::default(),
             transition_in: None,
+            transition_out: None,
             label_color: None,
             name: None,
             group: None,

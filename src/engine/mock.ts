@@ -114,6 +114,7 @@ export class MockEngine implements EngineClient {
       right.duration = clip.duration - offset;
       right.audio.fade_in_us = 0;
       right.transition_in = null;
+      left.transition_out = null;
       if (left.payload.type === "media" && right.payload.type === "media") {
         const srcOff = Math.round(offset * clip.speed);
         right.payload.src_in = left.payload.src_in + srcOff;
@@ -354,11 +355,16 @@ export class MockEngine implements EngineClient {
     });
   }
 
-  async setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot> {
+  async setClipTransition(
+    clipId: Id,
+    transition: TransitionRef | null,
+    out?: boolean,
+  ): Promise<StateSnapshot> {
     return this.transaction("Edit transition", () => {
       const found = this.locate(clipId);
       if (!found) throw new Error("clip not found");
-      found.clip.transition_in = transition;
+      if (out) found.clip.transition_out = transition;
+      else found.clip.transition_in = transition;
     });
   }
 
@@ -577,6 +583,7 @@ export class MockEngine implements EngineClient {
         transform: structuredClone(DEFAULT_TRANSFORM),
         audio: structuredClone(DEFAULT_AUDIO),
         transition_in: null,
+        transition_out: null,
         label_color: null,
       });
       track.clips.sort((a, b) => a.start - b.start);
@@ -872,6 +879,7 @@ function emptyClipDefaults() {
     transform: structuredClone(DEFAULT_TRANSFORM),
     audio: { ...DEFAULT_AUDIO, muted: true },
     transition_in: null,
+    transition_out: null,
     label_color: null,
     group: null,
   };
@@ -931,6 +939,7 @@ function mediaClip(
     transform: structuredClone(DEFAULT_TRANSFORM),
     audio: { ...structuredClone(DEFAULT_AUDIO), ...audioExtra },
     transition_in: null,
+    transition_out: null,
     label_color: null,
     group: null,
     ...clipExtra,
@@ -948,6 +957,7 @@ function textClip(content: string, startS: number, durationS: number): Clip {
     transform: structuredClone(DEFAULT_TRANSFORM),
     audio: structuredClone(DEFAULT_AUDIO),
     transition_in: null,
+    transition_out: null,
     label_color: null,
     group: null,
   };

@@ -1606,6 +1606,7 @@ pub(crate) fn add_subtitles_clip_impl(state: &AppState, id: Id) -> Res<Id> {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -1824,7 +1825,7 @@ pub(crate) fn avatar_generate_blocking(
     driver_asset: Id,
     emit: &dyn Fn(&str, f64, String),
 ) -> Res<Id> {
-    let (config, mut doc, conform, seq_size, seq_fps, cache_dir) = {
+    let (config, mut doc, conform, voice_duration, seq_size, seq_fps, cache_dir) = {
         let store = state.store.lock().unwrap();
         let config = store
             .project
@@ -1845,6 +1846,7 @@ pub(crate) fn avatar_generate_blocking(
             .clone();
         let asset = store.project.asset(driver_asset).ok_or("asset not found")?;
         let conform = asset.audio_conform.clone();
+        let voice_duration = asset.probe.duration_us;
         let seq = store
             .project
             .sequence(store.project.active_sequence)
@@ -1853,6 +1855,7 @@ pub(crate) fn avatar_generate_blocking(
             config,
             doc,
             conform,
+            voice_duration,
             seq.resolution,
             seq.fps,
             state.cache_dir.lock().unwrap().clone().ok_or("no cache dir")?,
@@ -1906,7 +1909,16 @@ pub(crate) fn avatar_generate_blocking(
 
     emit("rendering", 0.65, "Rendering the avatar video…".into());
     let out = cache_dir.join(format!("avatar_{}_{}.mov", config.id, driver_asset));
-    let duration = doc.segments.last().map(|s| s.end_us).unwrap_or(0).max(1_000_000);
+    // The avatar must last exactly as long as the VOICE. Whisper's last
+    // segment routinely overshoots the real audio end (observed: 2.2 s of
+    // audio → a 3.0 s segment tail), so the asset's probed duration rules and
+    // the transcript is only a fallback for assets with a broken probe.
+    let duration = if voice_duration > 0 {
+        voice_duration
+    } else {
+        doc.segments.last().map(|s| s.end_us).unwrap_or(0)
+    }
+    .max(1_000_000);
     ue_export::avatar_gen::generate(&config, &doc, duration, seq_size, seq_fps, &out, |_p| {})
         .map_err(|e| e.to_string())?;
 
@@ -2576,13 +2588,18 @@ fn set_clip_transition(
     state: State<AppState>,
     clip_id: String,
     transition: Option<ue_core::model::TransitionRef>,
+    out: Option<bool>,
 ) -> Res<StateSnapshot> {
     let mut store = state.store.lock().unwrap();
     let id = parse_id(&clip_id)?;
     store
         .dispatch(
             "Edit transition",
-            vec![ue_core::Action::SetClipTransition { clip_id: id, transition }],
+            vec![ue_core::Action::SetClipTransition {
+                clip_id: id,
+                transition,
+                out: out.unwrap_or(false),
+            }],
         )
         .map_err(|e| e.to_string())?;
     Ok(snapshot(&store))

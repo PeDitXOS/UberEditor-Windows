@@ -213,8 +213,12 @@ export class TauriEngine implements EngineClient {
   setClipEffects(clipId: Id, effects: EffectInstance[]): Promise<StateSnapshot> {
     return invoke("set_clip_effects", { clipId, effects });
   }
-  setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot> {
-    return invoke("set_clip_transition", { clipId, transition });
+  setClipTransition(
+    clipId: Id,
+    transition: TransitionRef | null,
+    out?: boolean,
+  ): Promise<StateSnapshot> {
+    return invoke("set_clip_transition", { clipId, transition, out: out ?? false });
   }
   addTextClip(content: string, atUs: TimeUs): Promise<StateSnapshot> {
     return invoke("add_text_clip", { content, atUs: us(atUs) });

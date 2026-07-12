@@ -459,7 +459,24 @@ fn tool_defs() -> Value {
                     }
                 },
                 "transition_in": {
-                    "description": "Cross-fade at the start of the clip. `null` removes it.",
+                    "description": "Transition at the start of the clip (A/B blend with an \
+                        adjacent previous base clip, or an entrance from black/transparent \
+                        otherwise — it always runs). `null` removes it.",
+                    "anyOf": [
+                        { "type": "null" },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "effect_id": { "type": "string", "description": "default 'core.crossfade'" },
+                                "duration_us": { "type": "integer", "description": "length in µs" }
+                            },
+                            "required": ["duration_us"]
+                        }
+                    ]
+                },
+                "transition_out": {
+                    "description": "Exit transition over the clip's tail (to black on the base \
+                        track, to transparent on layers). `null` removes it.",
                     "anyOf": [
                         { "type": "null" },
                         {
@@ -1868,16 +1885,17 @@ fn set_clip_properties(
             actions.push(ue_core::Action::SetClipEffects { clip_id, effects });
             changed.push("effects");
         }
-        if let Some(v) = args.get("transition_in") {
+        for (key, out) in [("transition_in", false), ("transition_out", true)] {
+            let Some(v) = args.get(key) else { continue };
             let transition = if v.is_null() {
                 None
             } else {
                 let duration = v
                     .get("duration_us")
                     .and_then(|d| d.as_i64())
-                    .ok_or("transition_in.duration_us is required")?;
+                    .ok_or_else(|| format!("{key}.duration_us is required"))?;
                 if duration <= 0 {
-                    return Err("transition_in.duration_us must be > 0 (send null to remove)".into());
+                    return Err(format!("{key}.duration_us must be > 0 (send null to remove)"));
                 }
                 Some(TransitionRef {
                     effect_id: v
@@ -1889,8 +1907,8 @@ fn set_clip_properties(
                     params: Default::default(),
                 })
             };
-            actions.push(ue_core::Action::SetClipTransition { clip_id, transition });
-            changed.push("transition_in");
+            actions.push(ue_core::Action::SetClipTransition { clip_id, transition, out });
+            changed.push(key);
         }
         if let Some(speed) = args.f64("speed") {
             if speed <= 0.0 {

@@ -142,6 +142,81 @@ struct ActiveLayer {
     chain: Option<String>,
     /// The clip sits on the export's base track (fills the canvas).
     base: bool,
+    /// Transition ENTRANCE in progress at the sampled instant:
+    /// (xfade kind, duration s, position s). From black on the base, from
+    /// transparent on upper layers — exactly like the export.
+    entrance: Option<(&'static str, f64, f64)>,
+    /// Transition EXIT in progress (same tuple; position measured inside the
+    /// exit window). To black on the base, to transparent on layers.
+    exit: Option<(&'static str, f64, f64)>,
+}
+
+/// Would this clip's transition_in run as a REAL A/B xfade in the export
+/// (adjacent previous media clip on the same track, spare material)? When it
+/// would not, the export degrades it to an entrance — and so must we.
+fn xfade_would_apply(
+    project: &Project,
+    track: &ue_core::model::Track,
+    clip: &ue_core::model::Clip,
+) -> bool {
+    const MIN_TRANSITION: TimeUs = 40_000;
+    let Some(tr) = &clip.transition_in else { return false };
+    let Some(i) = track.clips.iter().position(|c| c.id == clip.id) else { return false };
+    if i == 0 {
+        return false;
+    }
+    let prev = &track.clips[i - 1];
+    if (prev.end() - clip.start).abs() > 1_000 {
+        return false;
+    }
+    let (
+        ClipPayload::Media { asset_id: prev_asset, src_out: prev_out, .. },
+        ClipPayload::Media { src_in: cur_in, .. },
+    ) = (&prev.payload, &clip.payload)
+    else {
+        return false;
+    };
+    let Some(passet) = project.asset(*prev_asset) else { return false };
+    let avail_left =
+        (((passet.probe.duration_us - prev_out).max(0)) as f64 / prev.speed) as TimeUs;
+    let avail_right = (*cur_in as f64 / clip.speed) as TimeUs;
+    let half = (tr.duration / 2).min(avail_left).min(avail_right);
+    half * 2 >= MIN_TRANSITION
+}
+
+/// The entrance active at `rel` µs into the clip, if any. On the base track a
+/// valid A/B xfade wins (the export runs that instead).
+fn entrance_at(
+    project: &Project,
+    track: &ue_core::model::Track,
+    clip: &ue_core::model::Clip,
+    rel: TimeUs,
+    base: bool,
+) -> Option<(&'static str, f64, f64)> {
+    let tr = clip.transition_in.as_ref()?;
+    if base && xfade_would_apply(project, track, clip) {
+        return None;
+    }
+    let d = tr.duration.min(clip.duration).max(40_000);
+    if rel >= d {
+        return None;
+    }
+    Some((crate::graph::xfade_kind(&tr.effect_id), d as f64 / 1e6, rel.max(0) as f64 / 1e6))
+}
+
+/// The exit active at `rel` µs into the clip, if any (tail window).
+fn exit_at(clip: &ue_core::model::Clip, rel: TimeUs) -> Option<(&'static str, f64, f64)> {
+    let tr = clip.transition_out.as_ref()?;
+    let d = tr.duration.min(clip.duration).max(40_000);
+    let from = clip.duration - d;
+    if rel < from {
+        return None;
+    }
+    Some((
+        crate::graph::xfade_kind(&tr.effect_id),
+        d as f64 / 1e6,
+        (rel - from).max(0) as f64 / 1e6,
+    ))
 }
 
 enum LayerSource {
@@ -220,6 +295,8 @@ pub fn render_preview_frame(
                         },
                         chain,
                         base: true,
+                        entrance: None,
+                        exit: None,
                     });
                 }
                 base_xfade = Some((kind, d_us as f64 / 1e6, pos_us as f64 / 1e6));
@@ -259,6 +336,8 @@ pub fn render_preview_frame(
                     },
                     chain,
                     base,
+                    entrance: entrance_at(project, track, clip, rel, base),
+                    exit: exit_at(clip, rel),
                 });
             }
             ClipPayload::Generator { generator_id, params, color_params } => {
@@ -268,7 +347,13 @@ pub fn render_preview_frame(
                 };
                 let source =
                     ue_render::render_generator(def, params, color_params, seq.fps, clip.duration);
-                layers.push(ActiveLayer { source: LayerSource::Gen { source }, chain, base });
+                layers.push(ActiveLayer {
+                    source: LayerSource::Gen { source },
+                    chain,
+                    base,
+                    entrance: entrance_at(project, track, clip, rel, base),
+                    exit: exit_at(clip, rel),
+                });
             }
             _ => {} // Text/Subtitles/Avatar are not video layers here
         }
@@ -360,6 +445,42 @@ pub fn render_preview_frame(
         fc.push(format!("color=c=black:s={cw}x{ch}:d=1,format=yuv420p[c0]"));
         current = "c0".into();
     }
+    // Entrance/exit of a single still: loop the (transparent|black) frame and
+    // the layer frame into short streams, run the REAL xfade over the
+    // effective duration and take the frame at the exact progress — the very
+    // filter the export runs, so every pattern (wipe, slide, circle…) matches
+    // 1:1. `leaving` swaps the xfade direction (input → nothing).
+    let fr = seq.fps.0 as f64 / seq.fps.1.max(1) as f64;
+    let trans_still = |fc: &mut Vec<String>,
+                       input: &str,
+                       from: &str, // "" = transparent copy of the input
+                       kind: &str,
+                       d: f64,
+                       pos: f64,
+                       leaving: bool,
+                       out: &str| {
+        let n = (d * fr).ceil() as i64 + 2;
+        let pos = pos.min(d - (0.5 / fr).min(d)).max(0.0);
+        let looped = format!("settb=AVTB,loop=loop={n}:size=1:start=0,setpts=N/({fps})/TB");
+        if from.is_empty() {
+            fc.push(format!("[{input}]split=2[{input}a][{input}b]"));
+            fc.push(format!("[{input}a]colorchannelmixer=aa=0,{looped}[{input}t]"));
+            fc.push(format!("[{input}b]{looped}[{input}s]"));
+        } else {
+            fc.push(format!("{from},{looped}[{input}t]"));
+            fc.push(format!("[{input}]{looped}[{input}s]"));
+        }
+        let (a, b) = if leaving {
+            (format!("{input}s"), format!("{input}t"))
+        } else {
+            (format!("{input}t"), format!("{input}s"))
+        };
+        fc.push(format!(
+            "[{a}][{b}]xfade=transition={kind}:duration={d:.6}:offset=0[{input}x]"
+        ));
+        fc.push(format!("[{input}x]trim=start={pos:.6},setpts=PTS-STARTPTS[{out}]"));
+    };
+
     for (k, layer) in layers.iter().enumerate().skip(skip_layers) {
         let src_label = match (&layer.source, input_idx[k]) {
             (LayerSource::Media { .. }, Some(i)) => format!("[{i}:v]"),
@@ -367,13 +488,59 @@ pub fn render_preview_frame(
             _ => continue,
         };
         let chain = layer.chain.as_deref().map(|c| format!("{c},")).unwrap_or_default();
+        // entrance takes priority when both windows overlap on a tiny clip
+        let trans = layer
+            .entrance
+            .map(|(kind, d, pos)| (kind, d, pos, false))
+            .or(layer.exit.map(|(kind, d, pos)| (kind, d, pos, true)));
         if layer.base && current.is_empty() {
             // base: chain (opaque, fits to canvas) then the export's norm
-            fc.push(format!("{src_label}{chain}{norm}[c0]"));
+            match &trans {
+                None => fc.push(format!("{src_label}{chain}{norm}[c0]")),
+                Some((kind, d, pos, leaving)) => {
+                    let p = (pos / d).clamp(0.0, 1.0);
+                    if let Some(mask) =
+                        crate::graph::circle_mask(kind, &format!("{p:.6}"), *leaving)
+                    {
+                        // crisp circle over black (the xfade circles are so
+                        // feathered they read as a fade)
+                        fc.push(format!("{src_label}{chain}{norm},{mask}[ebm{k}]"));
+                        fc.push(format!(
+                            "color=black:s={cw}x{ch}:r={fps}:d=1,format=yuv420p[ebb{k}]"
+                        ));
+                        fc.push(format!(
+                            "[ebb{k}][ebm{k}]overlay=eof_action=pass,format=yuv420p[c0]"
+                        ));
+                    } else {
+                        // entrance from / exit to BLACK, exactly like the export
+                        // (rate pinned: xfade refuses mismatched frame rates)
+                        fc.push(format!("{src_label}{chain}{norm}[eb{k}]"));
+                        let black =
+                            format!("color=black:s={cw}x{ch}:r={fps}:d=1,format=yuv420p");
+                        trans_still(&mut fc, &format!("eb{k}"), &black, kind, *d, *pos, *leaving, "c0");
+                    }
+                }
+            }
             current = "c0".into();
         } else {
-            // layer: chain (transparent) + PiP fit + rgba, then centre overlay
-            fc.push(format!("{src_label}{chain}{layer_fit},format=rgba[l{k}]"));
+            // layer: the transition runs on the RAW source frame (so patterns
+            // anchor to the video's own middle), then chain (transparent) +
+            // PiP fit + rgba, then centre overlay
+            match &trans {
+                None => fc.push(format!("{src_label}{chain}{layer_fit},format=rgba[l{k}]")),
+                Some((kind, d, pos, leaving)) => {
+                    let p = (pos / d).clamp(0.0, 1.0);
+                    if let Some(mask) =
+                        crate::graph::circle_mask(kind, &format!("{p:.6}"), *leaving)
+                    {
+                        fc.push(format!("{src_label}{mask}[l{k}t]"));
+                    } else {
+                        fc.push(format!("{src_label}format=rgba[l{k}r]"));
+                        trans_still(&mut fc, &format!("l{k}r"), "", kind, *d, *pos, *leaving, &format!("l{k}t"));
+                    }
+                    fc.push(format!("[l{k}t]{chain}{layer_fit},format=rgba[l{k}]"));
+                }
+            }
             let out = format!("c{}", k + 1);
             fc.push(format!(
                 "[{current}][l{k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass[{out}]"
@@ -492,6 +659,9 @@ pub fn render_preview_frame(
     // final downscale to the preview width
     fc.push(format!("[{current}]scale='min({max_width},iw)':-2[out]"));
 
+    if std::env::var_os("UE_DEBUG_FC").is_some() {
+        eprintln!("[preview fc] {}", fc.join(";\n  "));
+    }
     args.push("-filter_complex".into());
     args.push(fc.join(";"));
     args.extend(["-map".into(), "[out]".into()]);

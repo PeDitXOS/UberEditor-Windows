@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { TtsCatalog, TtsEngineInfo, TtsVoice } from "../engine/types";
 import { engine, useStore } from "../state/store";
+import { Slider } from "./Slider";
 
 /** One catalog fetch per app run (`say -v ?` is a subprocess). */
 let catalogPromise: Promise<TtsCatalog> | null = null;
@@ -165,18 +166,13 @@ export function VoiceoverSection() {
       </Row>
       {current?.rate && rate !== null && (
         <Row label={current.rate.label}>
-          <input
-            type="range"
-            className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
+          <Slider
+            value={rate}
             min={current.rate.min}
             max={current.rate.max}
             step={current.rate.step}
-            value={rate}
-            onChange={(e) => setRate(Number(e.target.value))}
+            onChange={(v) => setRate(v)}
           />
-          <span className="w-10 shrink-0 text-right font-[var(--font-mono)] text-[11px] text-ink">
-            {rate}
-          </span>
         </Row>
       )}
       <label className="flex cursor-pointer items-center gap-2 py-1 text-[11px] text-ink-dim">

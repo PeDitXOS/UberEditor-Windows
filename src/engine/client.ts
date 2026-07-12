@@ -126,7 +126,12 @@ export interface EngineClient {
   /** Reloads user packs from disk; returns the updated catalog. */
   reloadEffectPacks(): Promise<{ catalog: EffectDef[]; errors: string[]; dir: string | null }>;
   setClipEffects(clipId: Id, effects: EffectInstance[]): Promise<StateSnapshot>;
-  setClipTransition(clipId: Id, transition: TransitionRef | null): Promise<StateSnapshot>;
+  /** `out` = the EXIT transition (clip tail); default is the entrance. */
+  setClipTransition(
+    clipId: Id,
+    transition: TransitionRef | null,
+    out?: boolean,
+  ): Promise<StateSnapshot>;
   /** Adds a title clip on the top video track. */
   addTextClip(content: string, atUs: TimeUs): Promise<StateSnapshot>;
   setClipText(clipId: Id, content: string, style: TextStyle): Promise<StateSnapshot>;

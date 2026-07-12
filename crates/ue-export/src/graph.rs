@@ -1041,6 +1041,28 @@ pub const TRANSITION_KINDS: &[(&str, &str, &str)] = &[
     ("core.radial", "radial", "Radial"),
 ];
 
+/// Sharp circular alpha mask for the circle transitions. ffmpeg's xfade
+/// circles are so feathered they read as a plain fade; this geq mask matches
+/// the crisp circle the play compositor draws, anchored to the frame centre.
+/// `p_expr` = progress 0..1 (a literal or a `T`-based expression).
+pub fn circle_mask(kind: &str, p_expr: &str, leaving: bool) -> Option<String> {
+    let (inside, r) = match (kind, leaving) {
+        ("circleopen", false) => (true, format!("({p_expr})")),
+        ("circleopen", true) => (true, format!("(1-({p_expr}))")),
+        ("circleclose", false) => (false, format!("(1-({p_expr}))")),
+        ("circleclose", true) => (false, format!("({p_expr})")),
+        _ => return None,
+    };
+    let md = "hypot(W/2,H/2)";
+    let dist = "hypot(X-W/2,Y-H/2)";
+    let m = if inside {
+        format!("clip(({r}*{md}-{dist})/(0.02*{md}),0,1)")
+    } else {
+        format!("clip(({dist}-{r}*{md})/(0.02*{md}),0,1)")
+    };
+    Some(format!("format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{m}'"))
+}
+
 pub fn xfade_kind(effect_id: &str) -> &'static str {
     TRANSITION_KINDS
         .iter()
@@ -1117,6 +1139,11 @@ pub fn build_ffmpeg_args(
         start: TimeUs,
         out_dur: TimeUs,
         vf: Option<String>,
+        /// Transition-in: on a layer it always runs as an ENTRANCE from
+        /// transparent (the tracks below stay visible through it).
+        trans: Option<(TimeUs, String)>,
+        /// Transition-out: the layer's tail EXITS to transparent.
+        trans_out: Option<(TimeUs, String)>,
     }
     let mut layer_clips: Vec<LayerClip> = vec![];
     for track in video_tracks.iter().skip(base_idx.map_or(usize::MAX, |i| i + 1)) {
@@ -1147,6 +1174,14 @@ pub fn build_ffmpeg_args(
                         start: clip.start,
                         out_dur: (((*src_out - *src_in) as f64) / clip.speed).round() as TimeUs,
                         vf: vf(),
+                        trans: clip
+                            .transition_in
+                            .as_ref()
+                            .map(|t| (t.duration, t.effect_id.clone())),
+                        trans_out: clip
+                            .transition_out
+                            .as_ref()
+                            .map(|t| (t.duration, t.effect_id.clone())),
                     });
                 }
                 ClipPayload::Generator { generator_id, params, color_params } => {
@@ -1166,6 +1201,14 @@ pub fn build_ffmpeg_args(
                         start: clip.start,
                         out_dur: clip.duration,
                         vf: vf(),
+                        trans: clip
+                            .transition_in
+                            .as_ref()
+                            .map(|t| (t.duration, t.effect_id.clone())),
+                        trans_out: clip
+                            .transition_out
+                            .as_ref()
+                            .map(|t| (t.duration, t.effect_id.clone())),
                     });
                 }
                 _ => {}
@@ -1311,8 +1354,44 @@ pub fn build_ffmpeg_args(
         }
     }
 
+    // Entrances: a transition that could not be an A/B xfade (single clip, a
+    // gap before, no spare material) still RUNS — as an xfade from black over
+    // the segment's own head. Never a silent no-op.
+    let mut seg_label: Vec<String> = (0..edl.len()).map(|k| format!("v{k}")).collect();
+    for (k, seg) in edl.iter().enumerate() {
+        let Segment::Source { entrance: Some((d, effect_id)), .. } = seg else { continue };
+        let d = (*d).min(seg.duration()).max(40_000);
+        let kind = xfade_kind(effect_id);
+        // black lives as long as the segment: xfade emits the blend during
+        // [0, d) and the segment alone afterwards
+        fc.push(format!(
+            "color=black:size={out_w}x{out_h}:rate={fps}:duration={},format=yuv420p,settb=AVTB[en{k}b];\
+             [v{k}]settb=AVTB[en{k}s];\
+             [en{k}b][en{k}s]xfade=transition={kind}:duration={}:offset=0,format=yuv420p[v{k}f]",
+            secs(seg.duration()),
+            secs(d),
+        ));
+        seg_label[k] = format!("v{k}f");
+    }
+    // Exits: the mirrored wrap — the segment's tail xfades TO black.
+    for (k, seg) in edl.iter().enumerate() {
+        let Segment::Source { exit: Some((d, effect_id)), .. } = seg else { continue };
+        let d = (*d).min(seg.duration()).max(40_000);
+        let kind = xfade_kind(effect_id);
+        let src = seg_label[k].clone();
+        fc.push(format!(
+            "color=black:size={out_w}x{out_h}:rate={fps}:duration={},format=yuv420p,settb=AVTB[ex{k}b];\
+             [{src}]settb=AVTB[ex{k}s];\
+             [ex{k}s][ex{k}b]xfade=transition={kind}:duration={}:offset={},format=yuv420p[v{k}g]",
+            secs(d),
+            secs(d),
+            secs(seg.duration() - d),
+        ));
+        seg_label[k] = format!("v{k}g");
+    }
+
     // Sequential combination: concat on hard cuts, xfade on transitions.
-    let mut current = "v0".to_string();
+    let mut current = seg_label[0].clone();
     let mut acc_dur = edl[0].duration();
     for (k, seg) in edl.iter().enumerate().skip(1) {
         let out_label = format!("m{k}");
@@ -1330,8 +1409,9 @@ pub fn build_ffmpeg_args(
                 // settb pair the whole export dies with "timebase … do not
                 // match" as soon as a transition follows any earlier cut.
                 fc.push(format!(
-                    "[{current}]settb=AVTB[xa{k}];[v{k}]settb=AVTB[xb{k}];\
+                    "[{current}]settb=AVTB[xa{k}];[{}]settb=AVTB[xb{k}];\
                      [xa{k}][xb{k}]xfade=transition={kind}:duration={}:offset={}[{out_label}]",
+                    seg_label[k],
                     secs(d),
                     secs(offset),
                 ));
@@ -1339,7 +1419,8 @@ pub fn build_ffmpeg_args(
             }
             None => {
                 fc.push(format!(
-                    "[{current}][v{k}]concat=n=2:v=1:a=0[{out_label}]"
+                    "[{current}][{}]concat=n=2:v=1:a=0[{out_label}]",
+                    seg_label[k],
                 ));
                 acc_dur += seg.duration();
             }
@@ -1369,23 +1450,76 @@ pub fn build_ffmpeg_args(
         // opacity (static or animated) is already applied in the clip's vf
         let alpha = "format=rgba,".to_string();
         let start = layer.start;
+        // Entrance/exit: xfade against a fully transparent copy, applied to
+        // the RAW source (0-based, before effects/transform), so the pattern
+        // anchors to the VIDEO's own frame — a circle opens from the middle
+        // of the image, not from the middle of the canvas the transform later
+        // positions it on. Effects/transform (with their `t`-based
+        // expressions) run afterwards on timeline PTS as always.
+        let clamp = |t: &(TimeUs, String)| ((t.0).min(layer.out_dur).max(40_000), xfade_kind(&t.1));
+        let entrance = layer.trans.as_ref().map(clamp);
+        let exit = layer.trans_out.as_ref().map(clamp);
+        let has_trans = entrance.is_some() || exit.is_some();
+        let (pre_label, tail_label) =
+            if has_trans { (format!("ly{k}p"), format!("ly{k}q")) } else { (format!("ly{k}p"), format!("ly{k}p")) };
         match &layer.src {
             LayerSrc::Media { asset_id, src_in, src_out, speed } => {
                 let asset = project.asset(*asset_id).expect("validated when collecting");
                 let idx = inputs.at(resolve_path(base_dir, &asset.path), *src_in);
                 fc.push(format!(
-                    "[{idx}:v]trim=start=0:end={},setpts=(PTS-STARTPTS)/{speed}+{}/TB,{effects}{fit},{alpha}fps={fps}[ly{k}]",
+                    "[{idx}:v]trim=start=0:end={},setpts=(PTS-STARTPTS)/{speed},format=rgba,fps={fps}[{pre_label}]",
                     secs(*src_out - *src_in),
-                    secs(start),
                 ));
             }
             LayerSrc::Gen { source } => {
                 fc.push(format!(
-                    "{source},setpts=PTS-STARTPTS+{}/TB,{effects}{fit},{alpha}fps={fps}[ly{k}]",
-                    secs(start),
+                    "{source},setpts=PTS-STARTPTS,format=rgba,fps={fps}[{pre_label}]",
                 ));
             }
         }
+        if has_trans {
+            let mut cur = pre_label.clone();
+            if let Some((d, kind)) = &entrance {
+                if let Some(mask) = circle_mask(kind, &format!("clip(T/{},0,1)", secs(*d)), false)
+                {
+                    fc.push(format!("[{cur}]{mask}[ly{k}e]"));
+                } else {
+                    fc.push(format!(
+                        "[{cur}]split=2[ly{k}ea][ly{k}eb];\
+                         [ly{k}ea]colorchannelmixer=aa=0,settb=AVTB[ly{k}et];\
+                         [ly{k}eb]settb=AVTB[ly{k}es];\
+                         [ly{k}et][ly{k}es]xfade=transition={kind}:duration={}:offset=0,format=rgba[ly{k}e]",
+                        secs(*d),
+                    ));
+                }
+                cur = format!("ly{k}e");
+            }
+            if let Some((d, kind)) = &exit {
+                let t0 = (layer.out_dur - d).max(0);
+                if let Some(mask) = circle_mask(
+                    kind,
+                    &format!("clip((T-{})/{},0,1)", secs(t0), secs(*d)),
+                    true,
+                ) {
+                    fc.push(format!("[{cur}]{mask}[ly{k}x]"));
+                } else {
+                    fc.push(format!(
+                        "[{cur}]split=2[ly{k}xa][ly{k}xb];\
+                         [ly{k}xb]colorchannelmixer=aa=0,settb=AVTB[ly{k}xt];\
+                         [ly{k}xa]settb=AVTB[ly{k}xs];\
+                         [ly{k}xs][ly{k}xt]xfade=transition={kind}:duration={}:offset={},format=rgba[ly{k}x]",
+                        secs(*d),
+                        secs(t0),
+                    ));
+                }
+                cur = format!("ly{k}x");
+            }
+            fc.push(format!("[{cur}]copy[{tail_label}]"));
+        }
+        fc.push(format!(
+            "[{tail_label}]setpts=PTS+{}/TB,{effects}{fit},{alpha}copy[ly{k}]",
+            secs(start),
+        ));
         let out_label = format!("lc{k}");
         fc.push(format!(
             "[{current}][ly{k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,{},{})'[{out_label}]",

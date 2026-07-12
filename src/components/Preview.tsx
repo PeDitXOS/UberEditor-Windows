@@ -203,8 +203,11 @@ export function Preview() {
   const sizeRef = useRef({ w: 0, h: 0 });
   // Export-exact paused frame (rendered by the backend with the SAME ffmpeg
   // graph the export runs). `bitmap: null` = "nothing to show for this key,
-  // keep the approximation" (avoids refetch loops).
-  const exactRef = useRef<{ key: string; bitmap: ImageBitmap | null } | null>(null);
+  // keep the approximation" — but only until `retryAt`: a transient backend
+  // failure must not freeze the paused preview on the approximation forever.
+  const exactRef = useRef<{ key: string; bitmap: ImageBitmap | null; retryAt: number } | null>(
+    null,
+  );
   const exactQueuedRef = useRef<string | null>(null);
   const exactTimerRef = useRef<number>(0);
   const exactLiveRef = useRef(false);
@@ -284,10 +287,16 @@ export function Preview() {
             : null;
           if (!running) return;
           exactRef.current?.bitmap?.close();
-          exactRef.current = { key, bitmap };
+          exactRef.current = { key, bitmap, retryAt: bitmap ? Infinity : performance.now() + 1500 };
         } catch (e) {
           engine.uiLog("warn", `exact frame: ${e instanceof Error ? e.message : e}`);
-          exactRef.current = { key, bitmap: null };
+          exactRef.current = { key, bitmap: null, retryAt: performance.now() + 1500 };
+        } finally {
+          // a null result may be transient (file mid-write, slow seek): let the
+          // paused loop re-request after retryAt instead of parking forever
+          if (exactQueuedRef.current === key && !exactRef.current?.bitmap) {
+            exactQueuedRef.current = null;
+          }
         }
       }, 160);
     };
@@ -336,7 +345,9 @@ export function Preview() {
             markExact(true);
             return;
           }
-          if (hit?.key !== key) scheduleExact(key, s.playheadUs, Math.round(w * dpr));
+          if (hit?.key !== key || (!hit.bitmap && performance.now() > hit.retryAt)) {
+            scheduleExact(key, s.playheadUs, Math.round(w * dpr));
+          }
         }
         markExact(false);
         const any = await compositeFrame(ctx, w, h, s.project, seq, s.playheadUs, frameSources);

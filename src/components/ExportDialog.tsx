@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { ExportUiSettings } from "../engine/client";
 import { usToDuration } from "../lib/time";
 import { useStore } from "../state/store";
+import { Slider } from "./Slider";
 
 interface Preset {
   name: string;
@@ -130,16 +131,15 @@ export function ExportDialog() {
               <option value={720}>Up to 720p</option>
             </select>
           </Field>
-          <Field label={`Quality CRF ${crf}`}>
-            <input
-              type="range"
-              className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
+          <Field label="Quality CRF">
+            <Slider
+              value={crf}
               min={14}
               max={28}
               step={1}
-              value={crf}
-              onChange={(e) => {
-                setCrf(Number(e.target.value));
+              onChange={(v) => {
+                // ffmpeg rejects CRF outside 0..51; keep typed values sane
+                setCrf(Math.round(Math.min(51, Math.max(0, v))));
                 setPresetIdx(-1);
               }}
             />

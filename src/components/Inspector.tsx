@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { Clip, EffectDef, EffectInstance, Param } from "../engine/types";
+import type { Clip, EffectDef, EffectInstance, Param, Project } from "../engine/types";
 import { hasKeyAt, removeKeyAt, withKeyAt } from "../engine/types";
 import {
   activeSequence,
@@ -11,6 +11,7 @@ import {
 } from "../engine/types";
 import { usToDuration, usToTimecode } from "../lib/time";
 import { engine, useStore } from "../state/store";
+import { Slider } from "./Slider";
 import { VoiceoverSection } from "./VoiceoverSection";
 
 /** One denoise-availability fetch per app run (it probes for python). */
@@ -34,80 +35,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <span className="w-20 shrink-0 text-[11px] text-ink-dim">{label}</span>
       <div className="flex min-w-0 flex-1 items-center gap-2">{children}</div>
     </label>
-  );
-}
-
-function Slider({
-  value,
-  min,
-  max,
-  step,
-  unit,
-  disabled,
-  format,
-  onChange,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  unit?: string;
-  disabled?: boolean;
-  format?: (v: number) => string;
-  onChange: (v: number) => void;
-}) {
-  const decimals = step < 1 ? 2 : 0;
-  const shown = format ? format(value) : `${value.toFixed(decimals)}${unit ?? ""}`;
-  // A slider alone can't hit an exact number, so the readout is an input:
-  // click it and type. ↑/↓ nudge by one step (×10 with Shift), Enter commits,
-  // Esc reverts. Typing is NOT clamped to the slider's range — the engine's
-  // own limits are the real ones, and a slider maximum shouldn't cap you.
-  const [draft, setDraft] = useState<string | null>(null);
-  const commit = (raw: string) => {
-    const n = Number(raw.replace(/[^\d.eE+-]/g, ""));
-    if (Number.isFinite(n)) onChange(n);
-    setDraft(null);
-  };
-  return (
-    <>
-      <input
-        type="range"
-        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent) disabled:opacity-40"
-        min={min}
-        max={max}
-        step={step}
-        value={Math.min(max, Math.max(min, value))}
-        disabled={disabled}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
-      <input
-        className="focus-ring w-14 shrink-0 rounded bg-transparent text-right font-[var(--font-mono)] text-[11px] text-ink hover:bg-bg3 focus:bg-bg3 disabled:opacity-40"
-        value={draft ?? shown}
-        disabled={disabled}
-        title="Type an exact value · ↑/↓ to nudge (Shift ×10)"
-        onFocus={(e) => {
-          setDraft(String(Number(value.toFixed(decimals))));
-          requestAnimationFrame(() => e.target.select());
-        }}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={(e) => commit(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            commit((e.target as HTMLInputElement).value);
-            (e.target as HTMLInputElement).blur();
-          } else if (e.key === "Escape") {
-            setDraft(null);
-            (e.target as HTMLInputElement).blur();
-          } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-            e.preventDefault();
-            const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
-            const next = Number((value + d).toFixed(6));
-            onChange(next);
-            setDraft(String(Number(next.toFixed(decimals))));
-          }
-        }}
-      />
-    </>
   );
 }
 
@@ -708,31 +635,18 @@ function ClipInspector({ clip }: { clip: Clip }) {
       {clip.payload.type === "media" && (
         <Section title="Speed">
           <div className="flex items-center gap-2">
-            <input
-              type="range"
-              className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-(--color-accent)"
+            <Slider
+              value={speedDraft ?? clip.speed}
               min={0.25}
               max={4}
               step={0.05}
-              value={speedDraft ?? clip.speed}
-              onChange={(e) => setSpeedDraft(Number(e.target.value))}
-              onPointerUp={() => {
-                if (speedDraft != null && Math.abs(speedDraft - clip.speed) > 1e-9)
-                  void setClipSpeed(clip.id, speedDraft);
+              unit="×"
+              onChange={(v) => setSpeedDraft(v)}
+              onCommit={(v) => {
                 setSpeedDraft(null);
+                if (Math.abs(v - clip.speed) > 1e-9) void setClipSpeed(clip.id, v);
               }}
-              title="Playback speed (export keeps the voice pitch, like YouTube)"
             />
-            <span className="w-12 shrink-0 text-right font-[var(--font-mono)] text-[11px] text-ink">
-              {(speedDraft ?? clip.speed).toFixed(2)}×
-            </span>
-            <button
-              className="focus-ring rounded-md border border-line px-1.5 py-0.5 text-[10.5px] text-ink-dim hover:text-ink"
-              onClick={() => void setClipSpeed(clip.id, 1)}
-              title="Back to normal speed"
-            >
-              1×
-            </button>
           </div>
           <p className="mt-1.5 text-[10px] leading-snug text-ink-faint">
             The clip {clip.speed > 1 ? "gets shorter" : clip.speed < 1 ? "gets longer" : "doesn't change"};
@@ -831,19 +745,29 @@ function ClipInspector({ clip }: { clip: Clip }) {
       {/* AI tools: driven by the clip's AUDIO, so they follow the audio tools */}
       {showAudioTools && clip.payload.type === "media" && asset && (
         <Section title="AI">
-          {!asset.transcript && (
-            <button
-              className="focus-ring w-full rounded-md border border-accent/60 bg-bg2 px-2.5 py-2 text-[12px] font-medium text-accent hover:bg-bg3 disabled:opacity-50"
-              disabled={transcribing}
-              onClick={() => void transcribeAsset(asset.id)}
-              title="Word-by-word transcription with Whisper (downloads the model the first time). Enables text-based editing, subtitles and the avatar."
-            >
-              {transcribing ? "⏳ Transcribing…" : "🎙 Transcribe (Whisper)"}
-            </button>
-          )}
+          <button
+            className={`focus-ring w-full rounded-md px-2.5 py-2 text-[12px] disabled:opacity-50 ${
+              asset.transcript
+                ? "border border-line bg-bg2 text-ink-dim hover:bg-bg3 hover:text-ink"
+                : "border border-accent/60 bg-bg2 font-medium text-accent hover:bg-bg3"
+            }`}
+            disabled={transcribing}
+            onClick={() => void transcribeAsset(asset.id)}
+            title={
+              asset.transcript
+                ? `Runs Whisper again with the current AI · Whisper settings (model "${project.settings.whisper_model}"). Replaces the transcript; subtitles clips keep working.`
+                : "Word-by-word transcription with Whisper (downloads the model the first time). Enables text-based editing, subtitles and the avatar."
+            }
+          >
+            {transcribing
+              ? "⏳ Transcribing…"
+              : asset.transcript
+                ? "↻ Re-transcribe (Whisper)"
+                : "🎙 Transcribe (Whisper)"}
+          </button>
           {asset.transcript && (
             <button
-              className="focus-ring w-full rounded-md border border-line bg-bg2 px-2.5 py-2 text-[12px] text-ink hover:bg-bg3"
+              className="focus-ring mt-1.5 w-full rounded-md border border-line bg-bg2 px-2.5 py-2 text-[12px] text-ink hover:bg-bg3"
               onClick={() => void addSubtitlesClip(clip.id)}
               title="Creates an auto-subtitles clip (by phrases) over this clip"
             >
@@ -862,7 +786,12 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </Section>
       )}
 
-      {showVideoTools && clip.payload.type === "media" && <TransitionPanel clip={clip} />}
+      {showVideoTools && clip.payload.type === "media" && (
+        <>
+          <TransitionPanel clip={clip} out={false} />
+          <TransitionPanel clip={clip} out={true} />
+        </>
+      )}
       {showVideoTools && <EffectsPanel clip={clip} />}
     </>
   );
@@ -1146,26 +1075,72 @@ const TRANSITION_KINDS: [string, string][] = [
   ["core.radial", "Radial"],
 ];
 
-function TransitionPanel({ clip }: { clip: Clip }) {
+/**
+ * How this clip's transition will run (mirroring the export's rules): a real
+ * A/B blend with the previous clip when it is adjacent and has spare
+ * material, an ENTRANCE from black/transparent otherwise. It always runs.
+ */
+function transitionMode(project: Project, clip: Clip): string {
+  const seq = activeSequence(project);
+  const track = seq.tracks.find((t) => t.clips.some((c) => c.id === clip.id));
+  const baseTrack = seq.tracks.find(
+    (t) =>
+      t.kind === "video" &&
+      !t.muted &&
+      t.clips.some((c) => c.payload.type === "media" || c.payload.type === "generator"),
+  );
+  const isBase = !!track && track.id === baseTrack?.id;
+  const entrance = isBase
+    ? "Enters from BLACK over the clip's first moments."
+    : "Enters from TRANSPARENT over the tracks below.";
+  if (!track || !isBase) return entrance;
+  const prev = track.clips.find((c) => Math.abs(c.start + c.duration - clip.start) <= 1_000);
+  if (!prev || prev.payload.type !== "media" || clip.payload.type !== "media") return entrance;
+  const prevAsset = project.assets.find(
+    (a) => a.id === (prev.payload as { asset_id: string }).asset_id,
+  );
+  if (!prevAsset) return entrance;
+  const availLeft =
+    Math.max(0, prevAsset.probe.duration_us - (prev.payload as { src_out: number }).src_out) /
+    prev.speed;
+  const availRight = (clip.payload as { src_in: number }).src_in / clip.speed;
+  const want = (clip.transition_in?.duration ?? 500_000) / 2;
+  const half = Math.min(want, availLeft, availRight);
+  if (half * 2 < 40_000) return entrance;
+  const eff = (half * 2) / 1e6;
+  return half < want
+    ? `Blends from the previous clip (shrunk to ${eff.toFixed(2)} s by the available material).`
+    : "Blends from the previous clip.";
+}
+
+function TransitionPanel({ clip, out }: { clip: Clip; out: boolean }) {
   const setClipTransition = useStore((s) => s.setClipTransition);
-  const durS = (clip.transition_in?.duration ?? 500_000) / 1e6;
+  const project = useStore((s) => s.project);
+  const current = out ? clip.transition_out : clip.transition_in;
+  const durS = (current?.duration ?? 500_000) / 1e6;
+  const mode = !current
+    ? null
+    : out
+      ? "Exits over the clip's tail — to black on the base track, to transparent on upper layers."
+      : transitionMode(project, clip);
 
   return (
-    <Section title="Transition in">
+    <Section title={out ? "Transition out" : "Transition in"}>
       <Row label="Type">
         <select
           className="focus-ring min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-bg2 px-2 py-1 text-[12px] text-ink"
-          value={clip.transition_in?.effect_id ?? ""}
+          value={current?.effect_id ?? ""}
           onChange={(e) =>
             void setClipTransition(
               clip.id,
               e.target.value
                 ? {
                     effect_id: e.target.value,
-                    duration: clip.transition_in?.duration ?? 500_000,
+                    duration: current?.duration ?? 500_000,
                     params: {},
                   }
                 : null,
+              out,
             )
           }
         >
@@ -1177,7 +1152,7 @@ function TransitionPanel({ clip }: { clip: Clip }) {
           ))}
         </select>
       </Row>
-      {clip.transition_in && (
+      {current && (
         <Row label="Duration">
           <Slider
             value={durS}
@@ -1186,18 +1161,21 @@ function TransitionPanel({ clip }: { clip: Clip }) {
             step={0.05}
             unit=" s"
             onChange={(v) =>
-              void setClipTransition(clip.id, {
-                ...clip.transition_in!,
-                duration: Math.round(v * 1e6),
-              })
+              void setClipTransition(
+                clip.id,
+                { ...current, duration: Math.round(v * 1e6) },
+                out,
+              )
             }
           />
         </Row>
       )}
-      <p className="mt-1 text-[10px] leading-snug text-ink-faint">
-        Needs extra material on both sides of the cut; if there isn't any, it
-        shrinks. Also works between clips with different speeds.
-      </p>
+      {(mode || !out) && (
+        <p className="mt-1 text-[10px] leading-snug text-ink-faint">
+          {mode ??
+            "Blends from the previous clip when one touches on the left with spare material; otherwise it enters from black (base) or transparent (upper layers)."}
+        </p>
+      )}
     </Section>
   );
 }

@@ -66,7 +66,8 @@ const FALLBACK_STEP_S = 0.08;
 interface FallbackFrame {
   bitmap: ImageBitmap | null;
   timeSec: number;
-  pending: boolean;
+  /** In-flight backend fetch, so a first-time miss can be awaited. */
+  pending: Promise<void> | null;
 }
 
 class VideoCache {
@@ -154,17 +155,18 @@ class VideoCache {
 
   /** Single frames decoded by the backend (ffmpeg → PNG with alpha), for
    *  codecs the webview cannot decode. Throttled: returns the latest frame
-   *  immediately and refreshes it in the background. */
-  private backendFrame(assetId: Id, time: number): LayerPixels | null {
+   *  immediately and refreshes it in the background. The FIRST fetch is
+   *  awaited (bounded): returning null there dropped the layer from the
+   *  composite — the avatar vanished on pause/seek until the PNG landed. */
+  private async backendFrame(assetId: Id, time: number): Promise<LayerPixels | null> {
     let f = this.fallback.get(assetId);
     if (!f) {
-      f = { bitmap: null, timeSec: -1, pending: false };
+      f = { bitmap: null, timeSec: -1, pending: null };
       this.fallback.set(assetId, f);
     }
     if (!f.pending && (f.bitmap === null || Math.abs(time - f.timeSec) > FALLBACK_STEP_S)) {
-      f.pending = true;
       const want = time;
-      void engine
+      f.pending = engine
         .renderAssetFrame(assetId, Math.round(want * 1e6), 1280)
         .then(async (bytes) => {
           if (!bytes) return;
@@ -179,8 +181,11 @@ class VideoCache {
         .catch((e) => engine.uiLog("warn", `fallback frame ${assetId}: ${e}`))
         .finally(() => {
           const cur = this.fallback.get(assetId);
-          if (cur) cur.pending = false;
+          if (cur) cur.pending = null;
         });
+    }
+    if (!f.bitmap && f.pending) {
+      await withTimeout(f.pending, FRAME_TIMEOUT_MS, "fallback frame").catch(() => {});
     }
     if (!f.bitmap) return null;
     return { source: f.bitmap, sw: f.bitmap.width, sh: f.bitmap.height };

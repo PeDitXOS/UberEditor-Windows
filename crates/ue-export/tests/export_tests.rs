@@ -81,10 +81,10 @@ fn edl_with_gap_and_two_sources() {
     assert_eq!(
         edl,
         vec![
-            Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 3 * SEC, speed: 1.0, vf: None, transition_in: None },
-            Segment::Source { asset_id: b, src_in: 4 * SEC, src_out: 6 * SEC, speed: 1.0, vf: None, transition_in: None },
+            Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 3 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
+            Segment::Source { asset_id: b, src_in: 4 * SEC, src_out: 6 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
             Segment::Black { duration: 1 * SEC },
-            Segment::Source { asset_id: a, src_in: 8 * SEC, src_out: 9 * SEC, speed: 1.0, vf: None, transition_in: None },
+            Segment::Source { asset_id: a, src_in: 8 * SEC, src_out: 9 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
         ]
     );
     assert_eq!(edl_duration(&edl), 6 * SEC);
@@ -101,9 +101,9 @@ fn edl_top_track_wins() {
     assert_eq!(
         edl,
         vec![
-            Segment::Source { asset_id: a, src_in: 0, src_out: 2 * SEC, speed: 1.0, vf: None, transition_in: None },
-            Segment::Source { asset_id: b, src_in: 0, src_out: 2 * SEC, speed: 1.0, vf: None, transition_in: None },
-            Segment::Source { asset_id: a, src_in: 4 * SEC, src_out: 6 * SEC, speed: 1.0, vf: None, transition_in: None },
+            Segment::Source { asset_id: a, src_in: 0, src_out: 2 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
+            Segment::Source { asset_id: b, src_in: 0, src_out: 2 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
+            Segment::Source { asset_id: a, src_in: 4 * SEC, src_out: 6 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None },
         ]
     );
 }
@@ -117,7 +117,7 @@ fn edl_merges_contiguous_and_trims_trailing_black() {
     let edl = build_video_edl(&store.project, seq).unwrap();
     assert_eq!(
         edl,
-        vec![Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 5 * SEC, speed: 1.0, vf: None, transition_in: None }]
+        vec![Segment::Source { asset_id: a, src_in: 1 * SEC, src_out: 5 * SEC, speed: 1.0, vf: None, transition_in: None, entrance: None, exit: None }]
     );
 }
 
@@ -862,8 +862,8 @@ fn transition_extends_handles_and_survives_edl() {
                 transition: Some(TransitionRef {
                     effect_id: "core.crossfade".into(),
                     duration: 1 * SEC,
-                    params: Default::default(),
-                }),
+                    params: Default::default() }),
+                out: false,
             }],
         )
         .unwrap();
@@ -899,8 +899,8 @@ fn transition_extends_handles_and_survives_edl() {
                 transition: Some(TransitionRef {
                     effect_id: "core.crossfade".into(),
                     duration: 1 * SEC,
-                    params: Default::default(),
-                }),
+                    params: Default::default() }),
+                out: false,
             }],
         )
         .unwrap();
@@ -957,8 +957,8 @@ fn crossfade_export_blends_and_keeps_duration() {
                 transition: Some(TransitionRef {
                     effect_id: "core.crossfade".into(),
                     duration: 1 * SEC,
-                    params: Default::default(),
-                }),
+                    params: Default::default() }),
+                out: false,
             }],
         )
         .unwrap();
@@ -1118,6 +1118,7 @@ fn auto_subtitles_burn_per_segment() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -1304,6 +1305,7 @@ fn word_mode_subtitles_burn_per_word() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -1390,6 +1392,7 @@ fn karaoke_mode_highlights_words_progressively() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -1529,6 +1532,7 @@ fn continuous_speech_chunks_into_multiple_captions() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -1691,6 +1695,7 @@ fn corrected_words_appear_in_captions() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -2049,7 +2054,7 @@ fn karaoke_highlights_the_active_word() {
         id: Id::new(),
         payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Karaoke, max_words: None },
         start: 0, duration: 10 * SEC, speed: 1.0, effects: vec![], transform: Default::default(),
-        audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+        audio: Default::default(), transition_in: None, transition_out: None, label_color: None, name: None, group: None,
     }, InsertMode::Strict).unwrap();
 
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-karaoke-hl.mp4");
@@ -2108,7 +2113,7 @@ fn karaoke_bounds_to_range_and_guards_the_rest() {
         id: Id::new(),
         payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Karaoke, max_words: None },
         start: 0, duration: 30 * SEC, speed: 1.0, effects: vec![], transform: Default::default(),
-        audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+        audio: Default::default(), transition_in: None, transition_out: None, label_color: None, name: None, group: None,
     }, InsertMode::Strict).unwrap();
 
     // a short range is bounded → only ~33 words → succeeds (used to crash)
@@ -2679,6 +2684,7 @@ fn preview_karaoke_matches_export() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -3249,6 +3255,7 @@ fn karaoke_wraps_across_lines() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -3534,6 +3541,7 @@ fn a_long_karaoke_transcript_no_longer_explodes_the_filtergraph() {
         transform: Default::default(),
         audio: Default::default(),
         transition_in: None,
+        transition_out: None,
         label_color: None,
         name: None,
         group: None,
@@ -3562,4 +3570,262 @@ fn a_long_karaoke_transcript_no_longer_explodes_the_filtergraph() {
     assert!(size > 100_000, "the whole transcript really is in the file ({size} bytes)");
     assert!(script.contains("\\k"), "karaoke uses ASS \\k timing tags");
     let _ = std::fs::remove_file(&p);
+}
+
+/// A transition must NEVER be a silent no-op: with a single clip (no previous
+/// neighbour, no handles) it runs as an ENTRANCE from black on the base, and
+/// on an upper layer it enters from TRANSPARENT over the tracks below —
+/// identical in the export and the paused preview.
+#[test]
+fn entrance_transition_runs_with_a_single_clip_and_on_layers() {
+    let Some(dir) = media_dir() else { return };
+    for (name, color) in [("xf_red.mp4", "red"), ("xf_blue.mp4", "blue")] {
+        let out = dir.join(name);
+        if !out.exists() {
+            let st = Command::new(ue_media::ffmpeg_bin())
+                .args([
+                    "-y", "-v", "error",
+                    "-f", "lavfi", "-i",
+                    &format!("color={color}:size=640x360:rate=30:duration=3"),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                ])
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+    }
+
+    // ---- base track, SINGLE clip with a 1 s crossfade: enters from black ----
+    let mut project = Project::new("entrance-base");
+    let seq_id = project.active_sequence;
+    let red = ue_media::import_file(&dir.join("xf_red.mp4")).unwrap();
+    let rid = red.id;
+    project.assets.push(red);
+    let v1 = project
+        .sequence(seq_id)
+        .unwrap()
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video)
+        .unwrap()
+        .id;
+    let mut store = ProjectStore::new(project);
+    let mut a = Clip::new_media(rid, 0, 2 * SEC, 0);
+    a.transition_in = Some(TransitionRef {
+        effect_id: "core.crossfade".into(),
+        duration: 1 * SEC,
+        params: Default::default(),
+    });
+    store.insert_clip(v1, a, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-entrance-base.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+    let (r0, _, _) = pixel_at(&out, 0.05, 960, 540);
+    let (rm, _, _) = pixel_at(&out, 0.5, 960, 540);
+    let (rf, _, _) = pixel_at(&out, 1.5, 960, 540);
+    eprintln!("base entrance: r(0.05)={r0} r(0.5)={rm} r(1.5)={rf}");
+    assert!(r0 < 60, "at p≈0 the frame is still black, was r={r0}");
+    assert!((60..=200).contains(&(rm as i32)), "at p=0.5 the fade is half red, was r={rm}");
+    assert!(rf > 180, "after the entrance the clip is fully there, was r={rf}");
+
+    // paused preview at the same instant matches the export
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, 500_000, 960, &[])
+        .unwrap()
+        .unwrap();
+    std::fs::write(dir.join("entrance-prev.jpg"), &jpeg).unwrap();
+    let prev = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-entrance-prev.png");
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y", "-v", "error", "-i"])
+        .arg(dir.join("entrance-prev.jpg"))
+        .args(["-vf", "scale=960:540"])
+        .arg(&prev)
+        .status()
+        .unwrap();
+    let (pr, _, _) = pixel_at_w(&prev, 0.0, 480, 270, 960);
+    eprintln!("base entrance paused: r(0.5)={pr} vs export {rm}");
+    assert!((pr as i32 - rm as i32).abs() <= 40, "paused ({pr}) diverges from export ({rm})");
+
+    // ---- upper layer with a 1 s crossfade: enters from TRANSPARENT ----
+    let mut project = Project::new("entrance-layer");
+    let seq_id = project.active_sequence;
+    let red = ue_media::import_file(&dir.join("xf_red.mp4")).unwrap();
+    let blue = ue_media::import_file(&dir.join("xf_blue.mp4")).unwrap();
+    let (rid, bid) = (red.id, blue.id);
+    project.assets.push(red);
+    project.assets.push(blue);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    let v2 = seq.tracks.iter().filter(|t| t.kind == TrackKind::Video).nth(1).unwrap().id;
+    let mut store = ProjectStore::new(project);
+    store.insert_clip(v1, Clip::new_media(rid, 0, 2 * SEC, 0), InsertMode::Strict).unwrap();
+    let mut b = Clip::new_media(bid, 0, 2 * SEC, 0);
+    b.transition_in = Some(TransitionRef {
+        effect_id: "core.crossfade".into(),
+        duration: 1 * SEC,
+        params: Default::default(),
+    });
+    store.insert_clip(v2, b, InsertMode::Strict).unwrap();
+
+    let out2 = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-entrance-layer.mp4");
+    let _ = std::fs::remove_file(&out2);
+    export_sequence(&store.project, seq_id, dir, &out2, &ExportSettings::default()).unwrap();
+    // centre: the blue PiP over the red base — half blended at p=0.5, blue after
+    let (mr, _, mb) = pixel_at(&out2, 0.5, 960, 540);
+    let (fr_, _, fb) = pixel_at(&out2, 1.5, 960, 540);
+    eprintln!("layer entrance: p=0.5 rgb=({mr},{mb}) after=({fr_},{fb})");
+    assert!((60..=200).contains(&(mr as i32)) && (60..=200).contains(&(mb as i32)),
+        "p=0.5 blends red base + blue layer, was ({mr},{mb})");
+    assert!(fb > 150 && fr_ < 90, "after the entrance the layer is opaque blue, was ({fr_},{fb})");
+
+    // paused preview parity at p=0.5
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, 500_000, 960, &[])
+        .unwrap()
+        .unwrap();
+    std::fs::write(dir.join("entrance-prev.jpg"), &jpeg).unwrap();
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y", "-v", "error", "-i"])
+        .arg(dir.join("entrance-prev.jpg"))
+        .args(["-vf", "scale=960:540"])
+        .arg(&prev)
+        .status()
+        .unwrap();
+    let (qr, _, qb) = pixel_at_w(&prev, 0.0, 480, 270, 960);
+    eprintln!("layer entrance paused: ({qr},{qb}) vs export ({mr},{mb})");
+    assert!((qr as i32 - mr as i32).abs() <= 40 && (qb as i32 - mb as i32).abs() <= 40,
+        "paused layer entrance diverges: preview=({qr},{qb}) export=({mr},{mb})");
+    let _ = std::fs::remove_file(dir.join("entrance-prev.jpg"));
+}
+
+/// Exit transitions mirror the entrances: the clip's tail leaves to black on
+/// the base track (single clip included) and to transparent on layers,
+/// identical in the export and the paused preview.
+#[test]
+fn exit_transition_runs_on_base_and_layers() {
+    let Some(dir) = media_dir() else { return };
+    for (name, color) in [("xf_red.mp4", "red"), ("xf_blue.mp4", "blue")] {
+        let out = dir.join(name);
+        if !out.exists() {
+            let st = Command::new(ue_media::ffmpeg_bin())
+                .args([
+                    "-y", "-v", "error",
+                    "-f", "lavfi", "-i",
+                    &format!("color={color}:size=640x360:rate=30:duration=3"),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                ])
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+    }
+
+    // base track, single red clip with a 1 s crossfade OUT: leaves to black
+    let mut project = Project::new("exit-base");
+    let seq_id = project.active_sequence;
+    let red = ue_media::import_file(&dir.join("xf_red.mp4")).unwrap();
+    let blue = ue_media::import_file(&dir.join("xf_blue.mp4")).unwrap();
+    let (rid, bid) = (red.id, blue.id);
+    project.assets.push(red);
+    project.assets.push(blue);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v1 = seq.tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    let v2 = seq.tracks.iter().filter(|t| t.kind == TrackKind::Video).nth(1).unwrap().id;
+    let mut store = ProjectStore::new(project);
+    let mut a = Clip::new_media(rid, 0, 2 * SEC, 0);
+    a.transition_out = Some(TransitionRef {
+        effect_id: "core.crossfade".into(),
+        duration: 1 * SEC,
+        params: Default::default(),
+    });
+    store.insert_clip(v1, a, InsertMode::Strict).unwrap();
+    // blue layer with a wipe-out over the tail
+    let mut b = Clip::new_media(bid, 0, 2 * SEC, 0);
+    b.transition_out = Some(TransitionRef {
+        effect_id: "core.crossfade".into(),
+        duration: 1 * SEC,
+        params: Default::default(),
+    });
+    store.insert_clip(v2, b, InsertMode::Strict).unwrap();
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-exit.mp4");
+    let _ = std::fs::remove_file(&out);
+    export_sequence(&store.project, seq_id, dir, &out, &ExportSettings::default()).unwrap();
+    // centre pixel: blue layer over red base. At 0.5 s both are full → blue.
+    // At 1.5 s both are half-left: blue@50% over red@50% over black.
+    let (er, _, eb) = pixel_at(&out, 0.5, 960, 540);
+    let (mr, _, mb) = pixel_at(&out, 1.5, 960, 540);
+    let (fr_, _, fb) = pixel_at(&out, 1.95, 960, 540);
+    eprintln!("exit: full=({er},{eb}) mid=({mr},{mb}) end=({fr_},{fb})");
+    assert!(eb > 150 && er < 90, "before the exit the layer is opaque blue, was ({er},{eb})");
+    assert!(mb < 150 && mb > 30, "half-way out the blue is fading, was ({mr},{mb})");
+    assert!(fr_ < 70 && fb < 70, "at the very end everything left to black, was ({fr_},{fb})");
+
+    // paused preview parity at 1.5 s
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, 1_500_000, 960, &[])
+        .unwrap()
+        .unwrap();
+    std::fs::write(dir.join("exit-prev.jpg"), &jpeg).unwrap();
+    let prev = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ue-exit-prev.png");
+    Command::new(ue_media::ffmpeg_bin())
+        .args(["-y", "-v", "error", "-i"])
+        .arg(dir.join("exit-prev.jpg"))
+        .args(["-vf", "scale=960:540"])
+        .arg(&prev)
+        .status()
+        .unwrap();
+    let (pr, _, pb) = pixel_at_w(&prev, 0.0, 480, 270, 960);
+    eprintln!("exit paused: ({pr},{pb}) vs export ({mr},{mb})");
+    assert!(
+        (pr as i32 - mr as i32).abs() <= 40 && (pb as i32 - mb as i32).abs() <= 40,
+        "paused exit diverges: preview=({pr},{pb}) export=({mr},{mb})"
+    );
+    let _ = std::fs::remove_file(dir.join("exit-prev.jpg"));
+}
+
+/// TEMP repro: Héctor's exact clip — layer with position transform + chroma
+/// key + circleopen entrance. Dumps the paused frame for visual inspection.
+#[test]
+fn repro_positioned_layer_circle_entrance() {
+    let av = Path::new("/Users/hectorpulido/Library/Caches/net.pequesoft.ubereditor/avatar_01KXA7TPXXT51EFZN0BEPH5C5J_01KXA7PRYRRVJMA058S8F9RDT1.mov");
+    if !av.exists() { return; }
+    let Some(dir) = media_dir() else { return };
+    let mut project = Project::new("repro");
+    let seq_id = project.active_sequence;
+    let avatar = ue_media::import_file(av).unwrap();
+    let aid = avatar.id;
+    project.assets.push(avatar);
+    let seq = project.sequence_mut(seq_id).unwrap();
+    seq.tracks.push(Track::new(TrackKind::Video, "V2"));
+    let v2 = seq.tracks.iter().filter(|t| t.kind == TrackKind::Video).nth(1).unwrap().id;
+    let mut store = ProjectStore::new(project);
+    // base clip on V1 so the avatar is a LAYER (like the real project)
+    let base = ue_media::import_file(&dir.join("xf_red.mp4")).unwrap();
+    let bid_base = base.id;
+    store.project.assets.push(base);
+    let v1 = store.project.sequence(seq_id).unwrap().tracks.iter().find(|t| t.kind == TrackKind::Video).unwrap().id;
+    store.insert_clip(v1, Clip::new_media(bid_base, 0, 2_200_000, 0), InsertMode::Strict).unwrap();
+    let mut c = Clip::new_media(aid, 0, 2_200_000, 0);
+    c.transform.position = (762.0.into(), 298.0.into());
+    c.effects.push(ue_core::model::EffectInstance {
+        effect_id: "core.chroma_key".into(),
+        enabled: true,
+        params: [("similarity".to_string(), 0.2179.into()), ("blend".to_string(), 0.08.into()), ("despill".to_string(), 0.69.into())].into_iter().collect(),
+        color_params: [("key_color".to_string(), "#00ff00".to_string())].into_iter().collect(),
+    });
+    c.transition_in = Some(TransitionRef {
+        effect_id: "core.circleopen".into(),
+        duration: 1_300_000,
+        params: Default::default(),
+    });
+    store.insert_clip(v2, c, InsertMode::Strict).unwrap();
+
+    let jpeg = ue_export::preview::render_preview_frame(&store.project, seq_id, dir, 650_000, 1280, &[])
+        .unwrap()
+        .unwrap();
+    std::fs::write("/tmp/ue_repro_circle.jpg", &jpeg).unwrap();
+    eprintln!("wrote /tmp/ue_repro_circle.jpg ({} bytes)", jpeg.len());
 }

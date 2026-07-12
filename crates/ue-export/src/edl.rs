@@ -28,6 +28,13 @@ pub enum Segment {
         /// Transition with the previous segment: (output duration µs, effect_id).
         /// The handles are already extended in src_in/src_out by the post-pass.
         transition_in: Option<(TimeUs, String)>,
+        /// Transition that could NOT run as an A/B xfade (first clip, previous
+        /// segment not a source, or no spare material): rendered as an
+        /// ENTRANCE from black instead — a transition must never be a silent
+        /// no-op. (duration µs, effect_id).
+        entrance: Option<(TimeUs, String)>,
+        /// Exit transition over the clip's tail, to black. (duration µs, effect_id).
+        exit: Option<(TimeUs, String)>,
     },
     Black { duration: TimeUs },
 }
@@ -129,6 +136,14 @@ pub fn build_video_edl_with(
                         } else {
                             None
                         };
+                        // …and the exit to its LAST segment
+                        let exit = if b == clip.end() {
+                            clip.transition_out
+                                .as_ref()
+                                .map(|t| (t.duration, t.effect_id.clone()))
+                        } else {
+                            None
+                        };
                         found = Some(Segment::Source {
                             asset_id: *asset_id,
                             src_in: s_in,
@@ -136,6 +151,8 @@ pub fn build_video_edl_with(
                             speed: clip.speed,
                             vf: ue_render::clip_vf(&registry, &clip.effects, &clip.transform, Some(seq.resolution)),
                             transition_in,
+                            entrance: None,
+                            exit,
                         });
                     }
                     break;
@@ -162,7 +179,9 @@ pub fn build_video_edl_with(
     for seg in segments {
         match (merged.last_mut(), &seg) {
             (
-                Some(Segment::Source { asset_id: a1, src_out: o1, vf: v1, speed: s1, .. }),
+                Some(Segment::Source {
+                    asset_id: a1, src_out: o1, vf: v1, speed: s1, exit: x1, ..
+                }),
                 Segment::Source {
                     asset_id: a2,
                     src_in: i2,
@@ -170,9 +189,13 @@ pub fn build_video_edl_with(
                     vf: v2,
                     speed: s2,
                     transition_in: None,
+                    entrance: None,
+                    exit: x2,
                 },
             ) if a1 == a2 && o1 == i2 && v1 == v2 && (s1.to_bits() == s2.to_bits()) => {
-                *o1 = *o2
+                *o1 = *o2;
+                // the exit lives on the clip's LAST segment: carry it through
+                *x1 = x2.clone();
             }
             (Some(Segment::Black { duration: d1 }), Segment::Black { duration: d2 }) => {
                 *d1 += *d2;
@@ -201,9 +224,17 @@ pub fn edl_duration(segments: &[Segment]) -> TimeUs {
 
 /// Transition post-pass: validates that there is a contiguous Source segment before,
 /// extends the handles (half on each side, limited by the file's
-/// material) and reduces or removes the transition if there is not enough material.
+/// material) and reduces the transition if there is not enough material.
+/// A transition that cannot run as an A/B xfade DEGRADES to an entrance from
+/// black (`entrance`) instead of disappearing: it must never be a silent no-op.
 fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
     const MIN_TRANSITION: TimeUs = 40_000; // below ~1 frame it's not worth it
+    // demote: turn segment i's transition_in into an entrance
+    fn demote(segments: &mut [Segment], i: usize) {
+        if let Segment::Source { transition_in, entrance, .. } = &mut segments[i] {
+            *entrance = transition_in.take();
+        }
+    }
     for i in 0..segments.len() {
         let Segment::Source {
             transition_in: Some((want, _)),
@@ -215,11 +246,9 @@ fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
             continue;
         };
         let (want, cur_in, cur_speed) = (*want, *cur_in, *cur_speed);
-        // no Source segment right before → no transition
+        // no Source segment right before → entrance from black
         if i == 0 {
-            if let Segment::Source { transition_in, .. } = &mut segments[i] {
-                *transition_in = None;
-            }
+            demote(segments, i);
             continue;
         }
         // availability in OUTPUT TIME (asset / speed on each side)
@@ -231,18 +260,14 @@ fn apply_transition_handles(project: &Project, segments: &mut [Segment]) {
             _ => None,
         };
         let Some((avail_left_out, prev_speed)) = prev else {
-            if let Segment::Source { transition_in, .. } = &mut segments[i] {
-                *transition_in = None;
-            }
+            demote(segments, i);
             continue;
         };
         let avail_right_out = (cur_in as f64 / cur_speed) as TimeUs;
         let half = (want / 2).min(avail_left_out).min(avail_right_out);
         let effective = half * 2;
         if effective < MIN_TRANSITION {
-            if let Segment::Source { transition_in, .. } = &mut segments[i] {
-                *transition_in = None;
-            }
+            demote(segments, i);
             continue;
         }
         if let Segment::Source { src_out, .. } = &mut segments[i - 1] {

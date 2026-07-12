@@ -144,7 +144,10 @@ fn split_clip_data(clip: &Clip, offset: TimeUs) -> (Clip, Clip) {
     }
 
     // The in-transition stays on the left; the right one starts clean.
+    // Mirrored for the exit: it belongs to the clip's TAIL, so it stays on
+    // the right half and the left half loses it.
     right.transition_in = None;
+    left.transition_out = None;
 
     (left, right)
 }

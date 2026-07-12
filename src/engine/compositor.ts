@@ -49,8 +49,11 @@ export interface Layer {
   srcUs?: number;
   /** The clip sits on the base track: it fills the canvas like the export. */
   isBase: boolean;
-  /** Extra alpha (incoming clip of a crossfade). */
+  /** Extra alpha (incoming clip of a crossfade / fade entrance-exit). */
   alphaMul: number;
+  /** Non-fade transition in progress: draw through its pattern mask.
+   *  `reveal` = how much of the layer is visible (1 = fully there). */
+  trans?: { kind: string; reveal: number };
 }
 
 /** Export parity: transitions shorter than ~1 frame are dropped (edl.rs). */
@@ -100,6 +103,7 @@ function pushMediaOrImage(
   tUs: number,
   isBase: boolean,
   alphaMul: number,
+  trans?: Layer["trans"],
 ) {
   if (clip.payload.type !== "media") return;
   const assetId = clip.payload.asset_id;
@@ -112,6 +116,7 @@ function pushMediaOrImage(
     srcUs: clip.payload.src_in + rel * clip.speed,
     isBase,
     alphaMul,
+    trans,
   });
 }
 
@@ -135,9 +140,18 @@ export function videoLayers(project: Project, seq: Sequence, playheadUs: number)
         if (half <= 0) continue;
         const cut = clipB.start;
         if (playheadUs < cut - half || playheadUs >= cut + half) continue;
-        const progress = (playheadUs - (cut - half)) / (2 * half);
+        const progress = Math.min(1, Math.max(0, (playheadUs - (cut - half)) / (2 * half)));
+        const kindB = clipB.transition_in.effect_id;
         pushMediaOrImage(out, project, clipA, playheadUs, true, 1);
-        pushMediaOrImage(out, project, clipB, playheadUs, true, Math.min(1, Math.max(0, progress)));
+        if (kindB === "core.crossfade" || kindB === "core.dissolve" || kindB === "core.pixelize") {
+          pushMediaOrImage(out, project, clipB, playheadUs, true, progress);
+        } else {
+          // real pattern: B wipes/slides/circles in over A
+          pushMediaOrImage(out, project, clipB, playheadUs, true, 1, {
+            kind: kindB,
+            reveal: progress,
+          });
+        }
         handled = true;
       }
       if (handled) continue;
@@ -145,10 +159,44 @@ export function videoLayers(project: Project, seq: Sequence, playheadUs: number)
 
     const clip = activeClipAt(track, playheadUs);
     if (!clip) continue;
+    // Transition that is NOT a base A/B xfade: it runs as an ENTRANCE (from
+    // black on the base, from transparent on layers) or an EXIT on the tail —
+    // see the export. Crossfade rides the cheap alphaMul path; every other
+    // kind carries its pattern for the mask renderer.
+    let alphaMul = 1;
+    let trans: Layer["trans"];
+    const rel = playheadUs - clip.start;
+    const i = track.clips.indexOf(clip);
+    const prev = i > 0 ? track.clips[i - 1] : undefined;
+    const abValid =
+      !!clip.transition_in && isBase && !!prev && transitionHalf(project, prev, clip) > 0;
+    let reveal: number | null = null;
+    let kind = "core.crossfade";
+    if (clip.transition_in && !abValid) {
+      const d = Math.max(40_000, Math.min(clip.transition_in.duration, clip.duration));
+      if (rel < d) {
+        reveal = Math.min(1, Math.max(0, rel / d));
+        kind = clip.transition_in.effect_id;
+      }
+    }
+    if (reveal === null && clip.transition_out) {
+      const d = Math.max(40_000, Math.min(clip.transition_out.duration, clip.duration));
+      if (rel >= clip.duration - d) {
+        reveal = Math.min(1, Math.max(0, (clip.duration - rel) / d));
+        kind = clip.transition_out.effect_id;
+      }
+    }
+    if (reveal !== null) {
+      if (kind === "core.crossfade" || kind === "core.dissolve" || kind === "core.pixelize") {
+        alphaMul = reveal; // fade (and the two grain kinds approximate as fade)
+      } else {
+        trans = { kind, reveal };
+      }
+    }
     if (clip.payload.type === "media") {
-      pushMediaOrImage(out, project, clip, playheadUs, isBase, 1);
+      pushMediaOrImage(out, project, clip, playheadUs, isBase, alphaMul, trans);
     } else if (clip.payload.type === "generator") {
-      out.push({ kind: "generator", clip, isBase, alphaMul: 1 });
+      out.push({ kind: "generator", clip, isBase, alphaMul, trans });
     }
   }
   return out;
@@ -691,6 +739,16 @@ export function generatorPixels(clip: Clip): LayerPixels | null {
 // Layer drawing (fit rules mirror ue-render transform_vf + the export norm)
 // ---------------------------------------------------------------------------
 
+/** Where a layer landed on the canvas (CSS px): centre + drawn size. The
+ *  transition masks centre their patterns on THIS rect — ffmpeg's layer
+ *  xfades run on the layer's own frame, not on the canvas. */
+export interface DrawnRect {
+  cx: number;
+  cy: number;
+  dw: number;
+  dh: number;
+}
+
 export function drawMediaLayer(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -700,7 +758,7 @@ export function drawMediaLayer(
   layer: Layer,
   rel: number,
   fx: LayerFx,
-) {
+): DrawnRect | undefined {
   if (pixels.sw <= 0 || pixels.sh <= 0) return;
   const [cw, ch] = seqRes;
   const k = w / cw; // CSS px per sequence px (drawing happens in CSS px)
@@ -801,6 +859,7 @@ export function drawMediaLayer(
     ctx.drawImage(source, cx - (dw * k) / 2, cy - (dh * k) / 2, dw * k, dh * k);
   }
   ctx.restore();
+  return { cx, cy, dw: dw * k, dh: dh * k };
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,10 +1100,107 @@ export async function compositeFrame(
       ctx.fillRect(0, 0, w, h);
       ctx.restore();
     }
-    drawMediaLayer(ctx, w, h, seqRes, pixels, layer, Math.max(0, rel), layerEffects(layer.clip, Math.max(0, rel)));
+    const paint = (c: CanvasRenderingContext2D) =>
+      drawMediaLayer(c, w, h, seqRes, pixels, layer, Math.max(0, rel), layerEffects(layer.clip, Math.max(0, rel)));
+    if (layer.trans) {
+      drawThroughTransition(
+        ctx,
+        w,
+        h,
+        `${layer.clip.id}:trans`,
+        layer.trans.kind,
+        layer.trans.reveal,
+        layer.isBase, // base patterns run on the padded canvas, like the export
+        paint,
+      );
+    } else {
+      paint(ctx);
+    }
   }
 
   return layers.length > 0;
+}
+
+/**
+ * Draws `paint` through a transition pattern (wipes, slides, circles,
+ * radial) at `reveal` progress — the same direction ffmpeg's xfade uses, so
+ * playback matches pause/export. The pattern is centred on the LAYER's drawn
+ * rect (ffmpeg xfades the layer's own frame); base clips use the full padded
+ * canvas, exactly like the export. Kinds the canvas cannot reproduce
+ * (dissolve, pixelize) were already routed to the plain alpha ramp upstream.
+ */
+function drawThroughTransition(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  key: string,
+  kind: string,
+  reveal: number,
+  isBase: boolean,
+  paint: (c: CanvasRenderingContext2D) => DrawnRect | undefined,
+) {
+  const p = Math.min(1, Math.max(0, reveal));
+  const sw = Math.max(2, Math.round(w));
+  const sh = Math.max(2, Math.round(h));
+  const sctx = scratch(key, sw, sh);
+  if (!sctx) {
+    ctx.save();
+    ctx.globalAlpha = p;
+    paint(ctx);
+    ctx.restore();
+    return;
+  }
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, sw, sh);
+  const drawn = paint(sctx);
+  // the pattern's frame: the layer's drawn rect, or the whole canvas on base
+  const r =
+    !isBase && drawn
+      ? { x: drawn.cx - drawn.dw / 2, y: drawn.cy - drawn.dh / 2, w: drawn.dw, h: drawn.dh }
+      : { x: 0, y: 0, w: sw, h: sh };
+
+  if (kind === "core.slideleft" || kind === "core.slideright" || kind === "core.slideup") {
+    // the content slides within its own frame (clip to the rect)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    const dx = kind === "core.slideleft" ? r.w * (1 - p) : kind === "core.slideright" ? -r.w * (1 - p) : 0;
+    const dy = kind === "core.slideup" ? r.h * (1 - p) : 0;
+    ctx.drawImage(sctx.canvas, dx, dy, w, h);
+    ctx.restore();
+    return;
+  }
+
+  sctx.save();
+  sctx.globalCompositeOperation =
+    kind === "core.circleclose" ? "destination-out" : "destination-in";
+  sctx.fillStyle = "#fff";
+  if (kind === "core.wipeleft") {
+    sctx.fillRect(r.x + r.w * (1 - p), r.y, r.w * p, r.h);
+  } else if (kind === "core.wiperight") {
+    sctx.fillRect(r.x, r.y, r.w * p, r.h);
+  } else if (kind === "core.circleopen" || kind === "core.circleclose") {
+    const full = Math.hypot(r.w, r.h) / 2;
+    const rad = kind === "core.circleopen" ? full * p : full * (1 - p);
+    sctx.beginPath();
+    sctx.arc(r.x + r.w / 2, r.y + r.h / 2, Math.max(0, rad), 0, Math.PI * 2);
+    sctx.fill();
+  } else if (kind === "core.radial" && "createConicGradient" in sctx) {
+    const g = sctx.createConicGradient(0, r.x + r.w / 2, r.y + r.h / 2);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(Math.max(0.0001, p - 0.0001), "rgba(255,255,255,1)");
+    g.addColorStop(Math.min(1, p + 0.0001), "rgba(255,255,255,0)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    sctx.fillStyle = g;
+    sctx.fillRect(r.x, r.y, r.w, r.h);
+  } else {
+    // unknown pattern → plain fade through the mask
+    sctx.fillStyle = `rgba(255,255,255,${p})`;
+    sctx.fillRect(0, 0, sw, sh);
+  }
+  sctx.restore();
+  ctx.drawImage(sctx.canvas, 0, 0, w, h);
 }
 
 // ---------------------------------------------------------------------------

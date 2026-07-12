@@ -1086,7 +1086,6 @@ fn importing_the_same_avatar_twice_replaces_it() {
         c.expressions.push(AvatarExpression {
             name: "calm".into(),
             path: "/x/calm.png".into(),
-            description: String::new(),
         });
         c
     };
@@ -1206,6 +1205,7 @@ fn preview_frame_shows_subtitles_like_export() {
             transform: Default::default(),
             audio: Default::default(),
             transition_in: None,
+            transition_out: None,
             label_color: None,
             name: None,
             group: None,
@@ -1456,7 +1456,7 @@ fn preview_matches_export_pixel_for_pixel() {
             id: Id::new(),
             payload: ClipPayload::Subtitles { transcript_id: doc_id, style, mode: SubtitleMode::Phrase, max_words: None },
             start: 0, duration: 3*SEC, speed: 1.0, effects: vec![], transform: Default::default(),
-            audio: Default::default(), transition_in: None, label_color: None, name: None, group: None,
+            audio: Default::default(), transition_in: None, transition_out: None, label_color: None, name: None, group: None,
         }, InsertMode::Strict).unwrap();
     }
 
