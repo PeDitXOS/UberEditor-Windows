@@ -122,6 +122,15 @@ export interface UiState {
   exportAvatarConfig: (configId: Id) => Promise<void>;
   generateAvatarVideo: (configId: Id, driverAsset: Id) => Promise<void>;
   avatarProgress: { stage: string; progress: number; message: string } | null;
+  ttsProgress: { stage: string; progress: number; message: string } | null;
+  /** Synthesizes in the background; insertAtPlayhead also drops the clip there. */
+  generateSpeech: (
+    text: string,
+    engineId: string,
+    voice: string | null,
+    rate: number | null,
+    insertAtPlayhead: boolean,
+  ) => Promise<void>;
   setActiveSequence: (sequenceId: Id) => Promise<void>;
   cutTimelineRanges: (ranges: [TimeUs, TimeUs][]) => Promise<void>;
   moveTimelineRange: (fromUs: TimeUs, toUs: TimeUs, destUs: TimeUs) => Promise<void>;
@@ -246,6 +255,12 @@ export const useStore = create<UiState>((set, get) => {
         set({ avatarProgress: p, lastActionLabel: `Avatar: ${p.message}` });
         if (p.stage === "done" || p.stage === "error") {
           window.setTimeout(() => set({ avatarProgress: null }), 4000);
+        }
+      });
+      void engine.onTtsProgress((p) => {
+        set({ ttsProgress: p, lastActionLabel: `Voiceover: ${p.message}` });
+        if (p.stage === "done") {
+          window.setTimeout(() => set({ ttsProgress: null }), 4000);
         }
       });
       try {
@@ -668,6 +683,18 @@ export const useStore = create<UiState>((set, get) => {
     },
     setAvatarDriver: (assetId) => set({ avatarDriverAsset: assetId }),
     setShowAvatarDialog: (v) => set({ showAvatarDialog: v }),
+    ttsProgress: null,
+    generateSpeech: async (text, engineId, voice, rate, insertAtPlayhead) => {
+      try {
+        set({ ttsProgress: { stage: "starting", progress: 0.02, message: "Starting…" } });
+        const at = insertAtPlayhead ? get().playheadUs : null;
+        await engine.generateSpeech(text, engineId, voice, rate, at);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        engine.uiLog("error", `tts: ${msg}`);
+        set({ ttsProgress: { stage: "error", progress: 1, message: msg } });
+      }
+    },
     saveAvatarConfig: async (config) => {
       try {
         const [id, snap] = await engine.saveAvatarConfig(config);

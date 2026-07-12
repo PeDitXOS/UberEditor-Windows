@@ -12,6 +12,7 @@ import type {
   TimeUs,
   Transform2D,
   TransitionRef,
+  TtsCatalog,
 } from "./types";
 
 /**
@@ -213,6 +214,30 @@ export interface EngineClient {
   ): Promise<() => void>;
   pickJsonSavePath(defaultName: string): Promise<string | null>;
   pickJsonOpenPath(): Promise<string | null>;
+
+  // -- TTS voiceover (speech from text) --
+  /** Voice catalog + engine availability for the voiceover dialog. */
+  listTtsVoices(): Promise<TtsCatalog>;
+  /**
+   * Background synthesis (say | kokoro); progress arrives via onTtsProgress
+   * and the result lands in Media. `atUs` also drops the clip there.
+   * `rate`: words/min for say (90–400), speed multiplier for kokoro (0.5–2).
+   */
+  generateSpeech(
+    text: string,
+    engine: string,
+    voice: string | null,
+    rate: number | null,
+    atUs: TimeUs | null,
+  ): Promise<void>;
+  onTtsProgress(
+    cb: (p: { stage: string; progress: number; message: string }) => void,
+  ): Promise<() => void>;
+  /**
+   * Whether the NEURAL denoiser (DNS64) can run, plus a human hint. The
+   * Inspector disables the Denoise toggle and shows the hint when it cannot.
+   */
+  denoiseStatus(): Promise<[boolean, string]>;
 
   /** Generates the 1080x1920 vertical sequence (blurred background) and activates it. */
   generateVertical(): Promise<StateSnapshot>;

@@ -127,7 +127,7 @@ function McpPill() {
               </div>
               <p className="mt-3 text-[10px] leading-relaxed text-ink-faint">
                 A new token is generated every time the app starts. Keep it private: anyone
-                with it can edit your project. 47 tools available — see <b>docs/MCP.md</b>.
+                with it can edit your project. 54 tools available — see <b>docs/MCP.md</b>.
               </p>
             </>
           ) : (

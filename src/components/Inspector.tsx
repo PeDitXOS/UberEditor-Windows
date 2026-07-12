@@ -10,7 +10,23 @@ import {
   paramValue,
 } from "../engine/types";
 import { usToDuration, usToTimecode } from "../lib/time";
-import { useStore } from "../state/store";
+import { engine, useStore } from "../state/store";
+import { VoiceoverSection } from "./VoiceoverSection";
+
+/** One denoise-availability fetch per app run (it probes for python). */
+let denoiseStatusPromise: Promise<[boolean, string]> | null = null;
+function useDenoiseStatus(): [boolean, string] | null {
+  const [status, setStatus] = useState<[boolean, string] | null>(null);
+  useEffect(() => {
+    denoiseStatusPromise ??= engine.denoiseStatus();
+    let alive = true;
+    denoiseStatusPromise.then((v) => alive && setStatus(v)).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return status;
+}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -339,6 +355,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
   const playheadUs = useStore((s) => s.playheadUs);
   const transcribeAsset = useStore((s) => s.transcribeAsset);
   const transcribingIds = useStore((s) => s.transcribingIds);
+  const denoiseStatus = useDenoiseStatus();
   const transcribing = asset ? transcribingIds.includes(asset.id) : false;
   const relUs = Math.max(0, Math.min(Math.round(playheadUs - clip.start), clip.duration));
   const opacity = paramValue(clip.transform.opacity, relUs);
@@ -347,6 +364,20 @@ function ClipInspector({ clip }: { clip: Clip }) {
   const gain = paramValue(clip.audio.gain_db, relUs);
   /** Writes a value: keyframe at the playhead if the property animates. */
   const drive = (p: Param, v: number): Param => (isCurve(p) ? withKeyAt(p, relUs, v) : v);
+
+  // What the clip IS decides what the Inspector shows: an audio clip gets
+  // audio tools only, a video clip gets visual tools only, and a video clip
+  // that still CARRIES its audio (no linked pair, not muted) gets everything.
+  const track = activeSequence(project).tracks.find((t) =>
+    t.clips.some((c) => c.id === clip.id),
+  );
+  const onAudioTrack = track?.kind === "audio";
+  const hasAudioSource =
+    clip.payload.type === "media" && !!asset && asset.probe.audio_channels > 0;
+  const audioTravelsWithVideo =
+    !onAudioTrack && hasAudioSource && !clip.group && !clip.audio.muted;
+  const showAudioTools = onAudioTrack || audioTravelsWithVideo; // Audio, Silences, AI
+  const showVideoTools = !onAudioTrack; // Transform, Transition, Effects
 
   return (
     <>
@@ -360,6 +391,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </div>
       </div>
 
+      {showVideoTools && (
       <Section title="Transform">
         <Row label="Position X">
           <Slider
@@ -556,7 +588,9 @@ function ClipInspector({ clip }: { clip: Clip }) {
           </div>
         </Row>
       </Section>
+      )}
 
+      {showAudioTools && (
       <Section title="Audio">
         <Row label="Gain">
           <Slider
@@ -599,13 +633,21 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </Row>
         <Row label="Denoise">
           <label
-            className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-[11px] text-ink-dim"
-            title="DNS64 neural denoiser (same engine as the toolkit); renders in the background — playback and export switch to the clean audio when ready"
+            className={`flex min-w-0 flex-1 items-center gap-2 text-[11px] text-ink-dim ${
+              denoiseStatus && !denoiseStatus[0] && !clip.audio.denoise
+                ? "opacity-50"
+                : "cursor-pointer"
+            }`}
+            title={`DNS64 neural denoiser (same engine as the toolkit); renders in the background — playback and export switch to the clean audio when ready${
+              denoiseStatus ? `\n${denoiseStatus[1]}` : ""
+            }`}
           >
             <input
               type="checkbox"
               className="accent-(--color-accent)"
               checked={clip.audio.denoise}
+              // still uncheckable when the engine went away
+              disabled={denoiseStatus ? !denoiseStatus[0] && !clip.audio.denoise : false}
               onChange={(e) =>
                 void setClipAudio(clip.id, { ...clip.audio, denoise: e.target.checked })
               }
@@ -613,6 +655,11 @@ function ClipInspector({ clip }: { clip: Clip }) {
             Reduce background noise
           </label>
         </Row>
+        {denoiseStatus && !denoiseStatus[0] && (
+          <p className="pl-24 text-[10px] leading-snug text-ink-faint">
+            Unavailable: {denoiseStatus[1]}
+          </p>
+        )}
         <Row label="Fade in">
           <Slider
             value={clip.audio.fade_in_us / 1e6}
@@ -638,6 +685,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
           />
         </Row>
       </Section>
+      )}
 
       {clip.group && (
         <Section title="Link">
@@ -711,7 +759,7 @@ function ClipInspector({ clip }: { clip: Clip }) {
       {clip.payload.type === "generator" && <GeneratorPanel clip={clip} />}
       {clip.payload.type === "subtitles" && <SubtitlesPanel clip={clip} />}
 
-      {clip.payload.type === "media" && asset && asset.probe.audio_channels > 0 && (
+      {showAudioTools && clip.payload.type === "media" && asset && (
         <Section title="Silences">
           <Row label="Threshold">
             <Slider
@@ -780,8 +828,8 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </Section>
       )}
 
-      {/* AI tools: driven by the clip's AUDIO, so any clip with sound gets them */}
-      {clip.payload.type === "media" && asset && asset.probe.audio_channels > 0 && (
+      {/* AI tools: driven by the clip's AUDIO, so they follow the audio tools */}
+      {showAudioTools && clip.payload.type === "media" && asset && (
         <Section title="AI">
           {!asset.transcript && (
             <button
@@ -814,8 +862,8 @@ function ClipInspector({ clip }: { clip: Clip }) {
         </Section>
       )}
 
-      {clip.payload.type === "media" && <TransitionPanel clip={clip} />}
-      <EffectsPanel clip={clip} />
+      {showVideoTools && clip.payload.type === "media" && <TransitionPanel clip={clip} />}
+      {showVideoTools && <EffectsPanel clip={clip} />}
     </>
   );
 }
@@ -1507,6 +1555,7 @@ export function Inspector() {
               </select>
             </Row>
           </div>
+          <VoiceoverSection />
           <p className="mt-3 text-[11px] leading-relaxed text-ink-faint">
             Select a clip in the timeline to edit its properties.
           </p>

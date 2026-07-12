@@ -93,7 +93,7 @@ server still answers other calls (polls, reads).
 
 ## Tools
 
-51 tools. `tools/list` carries the full schema for each, plus MCP annotations:
+54 tools. `tools/list` carries the full schema for each, plus MCP annotations:
 
 | annotation | meaning |
 |---|---|
@@ -235,11 +235,19 @@ to preview the split.
   poll `get_job_status` → `{asset_id}`). A transparent avatar video, imported as
   an asset. **The driver is the voice**: only the asset's transcript and audio
   matter, never its video.
+- **`list_tts_voices`** — the TTS engine catalog for voiceovers: built-ins
+  (macOS `say`, the Youtubers-toolkit's Kokoro AI) plus any user engine
+  defined by a JSON manifest in the `tts_engines` folder. Per engine:
+  availability, voices, and what its `rate` means.
+- **`generate_speech`** `{text, engine, voice?, rate?, at_us?}` →
+  **`job_id`** (async; poll `get_job_status` → `{asset_id}`). Synthesizes the
+  script, imports the audio into the pool and, with `at_us`, drops a clip on
+  an audio track at that time. Kokoro's first run may download its model.
 
 ### Jobs (async long operations)
 
-`transcribe_asset`, `export_video` and `generate_avatar_video` return a
-`job_id` right away and run in the background.
+`transcribe_asset`, `export_video`, `generate_avatar_video` and
+`generate_speech` return a `job_id` right away and run in the background.
 
 - **`get_job_status`** `{job_id}` → `{status: running|done|error, progress,
   message, result?, error?, output_path?, output_bytes?}`. Poll until `done`

@@ -1,6 +1,9 @@
-//! ue-ai: content analysis. v0: silence detection (PLAN §7.C).
-//! Improved port of Youtubers-toolkit's `trim_by_silence`: fine RMS
-//! windows, dual threshold with hysteresis, minimum durations and padding.
+//! ue-ai: content analysis and generation.
+//! - silence detection (PLAN §7.C), an improved port of the toolkit's
+//!   `trim_by_silence`: fine RMS windows, hysteresis, minimums and padding.
+//! - per-segment emotion analysis for the avatar (PLAN §7.E).
+//! - text-to-speech voiceover (macOS `say` + the toolkit's Kokoro).
 
 pub mod emotion;
 pub mod silence;
+pub mod tts;

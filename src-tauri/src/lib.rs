@@ -28,6 +28,10 @@ pub struct AppState {
     pub registry: Mutex<Arc<Vec<ue_render::EffectDef>>>,
     pub user_packs: Mutex<Vec<ue_render::EffectDef>>,
     pub effects_dir: Mutex<Option<PathBuf>>,
+    /// User TTS engine manifests (`tts_engines/*.json`), like effect packs.
+    pub tts_dir: Mutex<Option<PathBuf>>,
+    /// Where the Kokoro engine provisions its own venv (self-contained).
+    pub kokoro_env_dir: Mutex<Option<PathBuf>>,
     pub mcp_port: Mutex<Option<u16>>,
     pub mcp_shutdown: AtomicBool,
     pub mcp_token: Mutex<String>,
@@ -181,6 +185,8 @@ impl AppState {
             registry: Mutex::new(Arc::new(ue_render::core_registry())),
             user_packs: Mutex::new(vec![]),
             effects_dir: Mutex::new(None),
+            tts_dir: Mutex::new(None),
+            kokoro_env_dir: Mutex::new(None),
             mcp_port: Mutex::new(None),
             mcp_shutdown: AtomicBool::new(false),
             mcp_token: Mutex::new(Id::new().to_string().to_lowercase()),
@@ -1070,8 +1076,12 @@ fn playback_position(state: State<AppState>) -> Res<(TimeUs, bool, f32, f32)> {
 /// fits, otherwise at the end of the track.
 #[tauri::command]
 fn add_clip(state: State<AppState>, asset_id: String, at_us: TimeUs) -> Res<StateSnapshot> {
+    add_clip_impl(&state, parse_id(&asset_id)?, at_us)
+}
+
+/// Shared by the add_clip command, the TTS voiceover and MCP.
+pub(crate) fn add_clip_impl(state: &AppState, asset_id: Id, at_us: TimeUs) -> Res<StateSnapshot> {
     let mut store = state.store.lock().unwrap();
-    let asset_id = parse_id(&asset_id)?;
     let asset = store
         .project
         .asset(asset_id)
@@ -1756,15 +1766,7 @@ pub(crate) fn import_avatar_config_impl(state: &AppState, path: &str) -> Res<Id>
                 continue;
             };
             if let Some(path) = resolve(p) {
-                cfg.expressions.push(AvatarExpression {
-                    name: name.to_string(),
-                    path,
-                    description: e
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                });
+                cfg.expressions.push(AvatarExpression { name: name.to_string(), path });
             }
         }
     }
@@ -1772,11 +1774,7 @@ pub(crate) fn import_avatar_config_impl(state: &AppState, path: &str) -> Res<Id>
     if cfg.expressions.is_empty() {
         for (name, p) in v.get("avatars").and_then(|a| a.as_object()).ok_or("no avatars in file")? {
             if let Some(path) = p.as_str().and_then(resolve) {
-                cfg.expressions.push(AvatarExpression {
-                    name: name.clone(),
-                    path,
-                    description: String::new(),
-                });
+                cfg.expressions.push(AvatarExpression { name: name.clone(), path });
             }
         }
     }
@@ -1869,12 +1867,7 @@ pub(crate) fn avatar_generate_blocking(
     }
 
     // classify each segment: LLM when configured, heuristic otherwise
-    let described: Vec<(String, String)> = config
-        .expressions
-        .iter()
-        .map(|e| (e.name.clone(), e.description.clone()))
-        .collect();
-    let labels: Vec<String> = described.iter().map(|(n, _)| n.clone()).collect();
+    let labels: Vec<String> = config.expressions.iter().map(|e| e.name.clone()).collect();
     let api_key = if config.api_key.is_empty() {
         std::env::var("OPENAI_API_KEY").unwrap_or_default()
     } else {
@@ -1901,13 +1894,7 @@ pub(crate) fn avatar_generate_blocking(
         );
         let (text, vol, secs) = &segs[i];
         let emotion = if use_api {
-            ue_ai::emotion::classify_via_api_described(
-                &api_base,
-                &api_key,
-                &config.model,
-                text,
-                &described,
-            )
+            ue_ai::emotion::classify_via_api(&api_base, &api_key, &config.model, text, &labels)
         } else {
             None
         };
@@ -1965,6 +1952,151 @@ fn generate_avatar_video(
             }
             Err(e) => {
                 dlog("avatar", &format!("generation failed: {e}"));
+                emit("error", 1.0, e);
+            }
+        }
+    });
+    Ok(())
+}
+
+// ---- TTS voiceover (speech from text: system `say` + toolkit Kokoro) ----
+
+/// Filesystem-safe slug from the script's first words, so the asset shows a
+/// friendly name in the pool ("speech_hola_a_todos_1a2b3c4d.aiff").
+fn tts_slug(text: &str) -> String {
+    let mut slug = String::new();
+    for w in text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        if !slug.is_empty() {
+            slug.push('_');
+        }
+        slug.extend(w.chars().flat_map(char::to_lowercase));
+        if slug.chars().count() >= 24 {
+            break;
+        }
+    }
+    if slug.is_empty() { "speech".into() } else { slug }
+}
+
+/// Synthesizes `text`, imports the audio into the pool and (optionally)
+/// drops a clip at `at_us`. Returns the asset id. Shared by the
+/// generate_speech command and the MCP tool.
+pub(crate) fn speech_generate_blocking(
+    app: Option<&tauri::AppHandle>,
+    state: &AppState,
+    text: &str,
+    engine: &str,
+    voice: Option<&str>,
+    rate: Option<f64>,
+    at_us: Option<TimeUs>,
+    emit: &dyn Fn(&str, f64, String),
+) -> Res<Id> {
+    use std::hash::{Hash, Hasher};
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("the script is empty".into());
+    }
+    let cache_dir = state.cache_dir.lock().unwrap().clone().ok_or("no cache dir")?;
+    let tts_dir = state.tts_dir.lock().unwrap().clone();
+    let kokoro_env = state.kokoro_env_dir.lock().unwrap().clone();
+    let (engines, _) = ue_ai::tts::registry(kokoro_env.as_deref(), tts_dir.as_deref());
+    let eng = engines
+        .iter()
+        .find(|e| e.id() == engine)
+        .ok_or_else(|| format!("unknown TTS engine '{engine}'"))?;
+    // one file per (engine, voice, rate, text): regenerating the same script
+    // rewrites the same file, and import dedupes by content hash anyway
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (engine, voice.unwrap_or(""), rate.map(f64::to_bits).unwrap_or(0), text).hash(&mut h);
+    let out = cache_dir.join(format!(
+        "speech_{}_{:08x}.{}",
+        tts_slug(text),
+        h.finish() as u32,
+        eng.ext()
+    ));
+    emit("synthesizing", 0.15, format!("Synthesizing with {}…", eng.name()));
+    eng.synthesize(text, voice, rate, &out)?;
+    emit("importing", 0.85, "Adding it to Media…".into());
+    let ids = import_media_impl(app, state, &[out.to_string_lossy().into_owned()])?;
+    let asset_id = *ids.first().ok_or("import produced no asset")?;
+    if let Some(at) = at_us {
+        add_clip_impl(state, asset_id, at)?;
+    }
+    emit("done", 1.0, "Voiceover ready in Media".into());
+    Ok(asset_id)
+}
+
+/// Engine catalog (built-ins + user manifests), voices included, for the
+/// voiceover dialog. `say -v ?` is a subprocess, hence the blocking task.
+#[tauri::command]
+async fn list_tts_voices(state: State<'_, AppState>) -> Res<serde_json::Value> {
+    let tts_dir = state.tts_dir.lock().unwrap().clone();
+    let kokoro_env = state.kokoro_env_dir.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::json!({
+            "engines": ue_ai::tts::catalog(kokoro_env.as_deref(), tts_dir.as_deref()),
+            "engines_dir": tts_dir.map(|d| d.display().to_string()),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Whether the NEURAL denoiser (DNS64) can run, with a human hint: the
+/// Inspector disables the Denoise toggle and shows how to enable it when it
+/// cannot. (`find_system_python` runs a subprocess, hence the blocking task.)
+#[tauri::command]
+async fn denoise_status(state: State<'_, AppState>) -> Res<(bool, String)> {
+    let env_dir = state
+        .models_dir
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.parent().map(|d| d.join("denoiser")));
+    tauri::async_runtime::spawn_blocking(move || {
+        ue_media::denoise::neural_status(env_dir.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Generates the voiceover in the BACKGROUND, imports it as media and, when
+/// `at_us` is given, drops the clip there. Emits "tts-progress"
+/// ({stage, progress, message}) and "state-changed".
+#[tauri::command]
+fn generate_speech(
+    app: tauri::AppHandle,
+    text: String,
+    engine: String,
+    voice: Option<String>,
+    rate: Option<f64>,
+    at_us: Option<TimeUs>,
+) -> Res<()> {
+    if text.trim().is_empty() {
+        return Err("the script is empty".into());
+    }
+    std::thread::spawn(move || {
+        let emit = |stage: &str, progress: f64, message: String| {
+            let _ = app.emit(
+                "tts-progress",
+                serde_json::json!({ "stage": stage, "progress": progress, "message": message }),
+            );
+        };
+        let state = app.state::<AppState>();
+        match speech_generate_blocking(
+            Some(&app),
+            &state,
+            &text,
+            &engine,
+            voice.as_deref(),
+            rate,
+            at_us,
+            &emit,
+        ) {
+            Ok(_) => {
+                let _ = app.emit("state-changed", ());
+            }
+            Err(e) => {
+                dlog("tts", &format!("generation failed: {e}"));
                 emit("error", 1.0, e);
             }
         }
@@ -2794,11 +2926,17 @@ pub fn run() {
                 for e in errors {
                     eprintln!("[packs] invalid manifest: {e}");
                 }
+                // user TTS engine manifests (same pack philosophy)
+                let tts = dir.join("tts_engines");
+                let _ = std::fs::create_dir_all(&tts);
+                *state.tts_dir.lock().unwrap() = Some(tts);
             }
             if let Ok(dir) = app.path().app_data_dir() {
                 let models = dir.join("models");
                 let _ = std::fs::create_dir_all(&models);
                 *state.models_dir.lock().unwrap() = Some(models);
+                // Kokoro provisions its own venv here on first use
+                *state.kokoro_env_dir.lock().unwrap() = Some(dir.join("kokoro"));
             }
             // PERSIST THE TOKEN. It used to be regenerated on every launch, so
             // any MCP client that cached the Authorization header (i.e. all of
@@ -2888,6 +3026,9 @@ pub fn run() {
             pick_avatar_media,
             export_avatar_config,
             import_avatar_config,
+            list_tts_voices,
+            generate_speech,
+            denoise_status,
             export_video,
             cancel_export,
             playback_play,

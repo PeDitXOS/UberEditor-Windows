@@ -25,6 +25,7 @@ import type {
   Track,
   Transform2D,
   TransitionRef,
+  TtsCatalog,
 } from "./types";
 import { DEFAULT_AUDIO, DEFAULT_TEXT_STYLE, DEFAULT_TRANSFORM, activeSequence } from "./types";
 
@@ -464,6 +465,46 @@ export class MockEngine implements EngineClient {
   }
   async onAvatarProgress(): Promise<() => void> {
     return () => {};
+  }
+  async listTtsVoices(): Promise<TtsCatalog> {
+    // fake catalog so the dialog can be developed in the browser
+    return {
+      engines: [
+        {
+          id: "say",
+          name: "System voice (say)",
+          available: true,
+          detail: "mock",
+          voices: [
+            { id: "Monica", name: "Monica", lang: "es_ES" },
+            { id: "Paulina", name: "Paulina", lang: "es_MX" },
+            { id: "Samantha", name: "Samantha", lang: "en_US" },
+          ],
+          rate: { min: 90, max: 400, default: 175, step: 5, label: "words/min" },
+        },
+        {
+          id: "kokoro",
+          name: "Kokoro AI",
+          available: true,
+          detail: "mock",
+          voices: [
+            { id: "ef_dora", name: "Dora", lang: "es" },
+            { id: "af_heart", name: "Heart", lang: "en-US" },
+          ],
+          rate: { min: 0.5, max: 2, default: 1, step: 0.05, label: "speed ×" },
+        },
+      ],
+      engines_dir: null,
+    };
+  }
+  async generateSpeech(): Promise<void> {
+    throw new Error("Voiceover generation requires the desktop app (npx tauri dev)");
+  }
+  async onTtsProgress(): Promise<() => void> {
+    return () => {};
+  }
+  async denoiseStatus(): Promise<[boolean, string]> {
+    return [true, "mock"];
   }
   async pickJsonSavePath(): Promise<string | null> {
     return null;
@@ -1026,8 +1067,8 @@ export function demoProject(): Project {
         id: "av_demo",
         name: "Demo avatar",
         expressions: [
-          { name: "calm", path: "/avatars/calm.png", description: "neutral, explaining" },
-          { name: "angry", path: "/avatars/angry.mp4", description: "furious, complaining" },
+          { name: "calm", path: "/avatars/calm.png" },
+          { name: "angry", path: "/avatars/angry.mp4" },
         ],
         shake_factor: 1,
         scale: 0.25,

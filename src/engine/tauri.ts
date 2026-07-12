@@ -17,6 +17,7 @@ import type {
   TimeUs,
   Transform2D,
   TransitionRef,
+  TtsCatalog,
 } from "./types";
 
 export function isTauri(): boolean {
@@ -353,6 +354,34 @@ export class TauriEngine implements EngineClient {
     return listen<{ stage: string; progress: number; message: string }>("avatar-progress", (e) =>
       cb(e.payload),
     );
+  }
+  listTtsVoices(): Promise<TtsCatalog> {
+    return invoke("list_tts_voices");
+  }
+  generateSpeech(
+    text: string,
+    engine: string,
+    voice: string | null,
+    rate: number | null,
+    atUs: TimeUs | null,
+  ): Promise<void> {
+    return invoke("generate_speech", {
+      text,
+      engine,
+      voice,
+      rate,
+      atUs: atUs === null ? null : us(atUs),
+    });
+  }
+  async onTtsProgress(
+    cb: (p: { stage: string; progress: number; message: string }) => void,
+  ): Promise<() => void> {
+    return listen<{ stage: string; progress: number; message: string }>("tts-progress", (e) =>
+      cb(e.payload),
+    );
+  }
+  denoiseStatus(): Promise<[boolean, string]> {
+    return invoke("denoise_status");
   }
   async pickJsonSavePath(defaultName: string): Promise<string | null> {
     return save({

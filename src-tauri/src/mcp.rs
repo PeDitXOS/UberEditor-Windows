@@ -646,10 +646,11 @@ fn tool_defs() -> Value {
             json!({
                 "config": {
                     "type": "object",
-                    "description": "{ id?, name, expressions: [{name, path, description}], \
+                    "description": "{ id?, name, expressions: [{name, path}], \
                         shake_factor?: 0..3, scale?: 0.05..1, model?, api_base?, api_key? }. \
-                        `path` is an image or video per expression; `description` is what the \
-                        LLM matches the speech against; the FIRST expression is the default.",
+                        `path` is an image or video per expression; `name` is the emotion \
+                        the LLM matches the speech against; the FIRST expression is the \
+                        default.",
                     "properties": { "name": { "type": "string" }, "expressions": { "type": "array" } },
                     "required": ["name", "expressions"]
                 }
@@ -698,6 +699,39 @@ fn tool_defs() -> Value {
                 "driver_asset": str_("asset id of the VOICE; must be transcribed"),
             }),
             &["config_id", "driver_asset"], Kind::Destructive,
+        ),
+        tool(
+            "list_tts_voices",
+            "TTS engine catalog for voiceovers: built-ins (macOS `say`, the \
+             self-contained Kokoro AI) plus user engines defined by JSON \
+             manifests in the tts_engines folder. Each engine reports \
+             availability, voices and its rate semantics.",
+            json!({}),
+            &[],
+            Kind::Read,
+        ),
+        tool(
+            "generate_speech",
+            "Voiceover from text: synthesizes the script with a TTS engine \
+             (see list_tts_voices), imports the audio into the media pool \
+             and, when `at_us` is given, also drops a clip there on an audio \
+             track. RUNS IN THE BACKGROUND: returns a `job_id` immediately; \
+             poll get_job_status until done — the `result` then has \
+             {asset_id}. `say` takes seconds; kokoro's FIRST run may install \
+             its own environment and model (minutes). Not undoable (it adds \
+             an asset).",
+            json!({
+                "text": str_("the exact words to speak"),
+                "engine": str_("engine id from list_tts_voices (say | kokoro | …)"),
+                "voice": str_("voice id from list_tts_voices (omit for the engine's default)"),
+                "rate": {
+                    "type": "number",
+                    "description": "engine-specific rate (say: words/min 90-400; kokoro: speed × 0.5-2)"
+                },
+                "at_us": int("timeline µs to insert the clip at; omit to only import"),
+            }),
+            &["text", "engine"],
+            Kind::Destructive,
         ),
         tool(
             "reload_effect_packs",
@@ -1379,6 +1413,38 @@ fn call_tool(state: &AppState, app: Option<&tauri::AppHandle>, name: &str, raw: 
                 })
             }
         },
+        "list_tts_voices" => {
+            let tts_dir = state.tts_dir.lock().unwrap().clone();
+            let kokoro_env = state.kokoro_env_dir.lock().unwrap().clone();
+            text_result(json!({
+                "engines": ue_ai::tts::catalog(kokoro_env.as_deref(), tts_dir.as_deref()),
+            }))
+        }
+        "generate_speech" => match (|| {
+            Ok::<_, String>((args.str("text")?.to_string(), args.str("engine")?.to_string()))
+        })() {
+            Err(e) => tool_error(&e),
+            Ok((text, engine_id)) => {
+                let voice = args.get("voice").and_then(|v| v.as_str()).map(str::to_string);
+                let rate = args.f64("rate");
+                let at_us = args.get("at_us").and_then(|v| v.as_i64());
+                let app_handle = app.cloned();
+                run_async(state, app, "tts", "generating voiceover…", move |s, jid| {
+                    let jid = jid.to_string();
+                    let asset_id = crate::speech_generate_blocking(
+                        app_handle.as_ref(),
+                        s,
+                        &text,
+                        &engine_id,
+                        voice.as_deref(),
+                        rate,
+                        at_us,
+                        &|_stage, p, msg| crate::job_progress(s, &jid, p, &msg),
+                    )?;
+                    Ok(json!({ "asset_id": asset_id.to_string() }))
+                })
+            }
+        },
         "reload_effect_packs" => {
             let errors = crate::reload_packs(state);
             text_result(json!({
@@ -1750,7 +1816,7 @@ fn get_catalog(state: &AppState) -> Result<Value, String> {
             "shake_factor": c.shake_factor,
             "model": c.model,
             "expressions": c.expressions.iter().map(|e| json!({
-                "name": e.name, "path": e.path, "description": e.description,
+                "name": e.name, "path": e.path,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "text_templates": crate::text_templates(state),

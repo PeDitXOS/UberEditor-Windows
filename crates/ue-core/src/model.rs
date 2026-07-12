@@ -36,17 +36,15 @@ pub struct Project {
     pub active_sequence: Id,
 }
 
-/// One avatar expression: a still image or a video loop, plus the text the
-/// classifier matches against ("angry", "furious, upset" …).
+/// One avatar expression: a still image or a video loop, named by the
+/// emotion the classifier matches ("angry", "calm", "wow" …) — the same
+/// shape as the toolkit's `{ emotion: path }` map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AvatarExpression {
     /// Key used by the emotion classifier and stored in the transcript.
     pub name: String,
     /// Absolute or project-relative path to an image or video.
     pub path: String,
-    /// Free-text description given to the LLM classifier (empty = use `name`).
-    #[serde(default)]
-    pub description: String,
 }
 
 /// A complete avatar setup: expressions + look + which model classifies.

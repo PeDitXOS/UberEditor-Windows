@@ -52,8 +52,9 @@ pub fn denoiser_python(app_env_dir: Option<&Path>) -> Option<std::path::PathBuf>
 }
 
 /// First working system interpreter: tries `python3`, `python` (and `py` on
-/// Windows), accepting only Python ≥ 3.9.
-fn find_system_python() -> Option<String> {
+/// Windows), accepting only Python ≥ 3.9. Shared by every Python sidecar
+/// (DNS64 here, Kokoro TTS in ue-ai).
+pub fn find_system_python() -> Option<String> {
     let candidates: &[&str] =
         if cfg!(windows) { &["python3", "python", "py"] } else { &["python3", "python"] };
     for cand in candidates {
@@ -69,12 +70,31 @@ fn find_system_python() -> Option<String> {
     None
 }
 
-fn venv_python(env_dir: &Path) -> std::path::PathBuf {
+/// `<env_dir>/venv`'s interpreter path, platform-aware.
+pub fn venv_python(env_dir: &Path) -> std::path::PathBuf {
     if cfg!(windows) {
         env_dir.join("venv/Scripts/python.exe")
     } else {
         env_dir.join("venv/bin/python")
     }
+}
+
+/// Whether the NEURAL denoiser (DNS64) can run, with a human hint the UI
+/// shows next to the checkbox. `false` means only the afftdn fallback would
+/// apply — the UI disables the toggle and explains how to enable DNS64.
+pub fn neural_status(app_env_dir: Option<&Path>) -> (bool, String) {
+    if std::env::var("UE_DENOISER_PYTHON")
+        .is_ok_and(|v| matches!(v.as_str(), "off" | "none" | "0" | ""))
+    {
+        return (false, "disabled by UE_DENOISER_PYTHON — unset it to re-enable".into());
+    }
+    if denoiser_python(app_env_dir).is_some() {
+        return (true, "DNS64 neural engine ready".into());
+    }
+    if app_env_dir.is_some() && find_system_python().is_some() {
+        return (true, "sets itself up on first use (one-time download)".into());
+    }
+    (false, "install Python 3 ≥ 3.9 (e.g. `brew install python`) to enable it".into())
 }
 
 /// Provisions the app-owned denoiser venv (one-time, self-contained: only a
@@ -144,6 +164,31 @@ fn denoise_dns64(python: &Path, src: &Path, out: &Path) -> MediaResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The only test touching UE_DENOISER_PYTHON (unit tests of this module
+    /// run in their own binary, so no cross-test env races).
+    #[test]
+    fn neural_status_honours_the_override() {
+        unsafe { std::env::set_var("UE_DENOISER_PYTHON", "off") };
+        let (ok, hint) = neural_status(None);
+        assert!(!ok);
+        assert!(hint.contains("UE_DENOISER_PYTHON"));
+
+        unsafe { std::env::set_var("UE_DENOISER_PYTHON", "/usr/bin/python3") };
+        let (ok, _) = neural_status(None);
+        assert!(ok);
+
+        unsafe { std::env::remove_var("UE_DENOISER_PYTHON") };
+        // without an env dir nor an override, availability depends on the
+        // machine's python; both outcomes must carry a non-empty hint
+        let (_, hint) = neural_status(None);
+        assert!(!hint.is_empty());
+    }
 }
 
 /// Renders the denoised variant (48 kHz stereo s16le, like the conform):

@@ -10,6 +10,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 ue-core = { path = "../ue-core" }
 ue-audio = { path = "../ue-audio" }
+ue-media = { path = "../ue-media" }
 
 [dev-dependencies]
 hound = "3.5"

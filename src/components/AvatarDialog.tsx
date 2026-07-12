@@ -93,10 +93,15 @@ export function AvatarDialog() {
             .replace(/^avatar[_-]?/i, "")
             .toLowerCase(),
           path,
-          description: "",
         })),
       ],
     }));
+  };
+
+  /** Replace ONE expression's media file (picker), keeping its name. */
+  const changeExprFile = async (i: number) => {
+    const paths = await engine.pickAvatarMedia();
+    if (paths.length) patchExpr(i, { path: paths[0] });
   };
 
   const move = (i: number, dir: -1 | 1) => {
@@ -215,7 +220,8 @@ export function AvatarDialog() {
             {draft.expressions.length === 0 && (
               <p className="px-1 py-2 text-[11px] leading-relaxed text-ink-faint">
                 Add one file per expression. The <b>first one is the default</b> (used when nothing
-                else matches). The description helps the classifier: “angry → furious, complaining”.
+                else matches). Name each one by emotion — that name is what the classifier picks:
+                “angry”, “calm”, “wow”…
               </p>
             )}
             <div className="space-y-1">
@@ -230,22 +236,26 @@ export function AvatarDialog() {
                   >
                     {i === 0 ? "★" : i + 1}
                   </span>
-                  <span className="shrink-0 text-[13px]" title={e.path}>
+                  <span className="shrink-0 text-[13px]" title={isVideo(e.path) ? "Video" : "Image"}>
                     {isVideo(e.path) ? "🎬" : "🖼"}
                   </span>
                   <input
-                    className="focus-ring w-24 shrink-0 rounded border border-line bg-bg1 px-1.5 py-0.5 text-[11px] text-ink"
+                    className="focus-ring w-28 shrink-0 rounded border border-line bg-bg1 px-1.5 py-0.5 text-[11px] text-ink"
                     value={e.name}
-                    placeholder="name"
+                    placeholder="emotion"
                     onChange={(ev) => patchExpr(i, { name: ev.target.value })}
-                    title="Label the classifier returns"
+                    title="Emotion the classifier matches (angry, calm, wow…)"
                   />
-                  <input
-                    className="focus-ring min-w-0 flex-1 rounded border border-line bg-bg1 px-1.5 py-0.5 text-[11px] text-ink placeholder:text-ink-faint"
-                    value={e.description}
-                    placeholder="when to use it (furious, upset…)"
-                    onChange={(ev) => patchExpr(i, { description: ev.target.value })}
-                  />
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-ink-dim" title={e.path}>
+                    {fileName(e.path)}
+                  </span>
+                  <button
+                    className="focus-ring shrink-0 rounded border border-line px-1.5 py-0.5 text-[10.5px] text-ink-dim hover:text-ink"
+                    onClick={() => void changeExprFile(i)}
+                    title={`Pick another image/video for this expression\nCurrent: ${e.path}`}
+                  >
+                    Change…
+                  </button>
                   <button
                     className="focus-ring rounded px-1 text-[10px] text-ink-faint hover:text-ink disabled:opacity-30"
                     disabled={i === 0}
@@ -267,6 +277,7 @@ export function AvatarDialog() {
                     onClick={() =>
                       patch({ expressions: draft.expressions.filter((_, k) => k !== i) })
                     }
+                    title="Remove this expression"
                   >
                     ✕
                   </button>

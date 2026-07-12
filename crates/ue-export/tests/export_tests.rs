@@ -1884,8 +1884,8 @@ fn avatar_spans_cover_the_timeline() {
     use ue_core::model::{AvatarConfig, AvatarExpression};
     let mut cfg = AvatarConfig::new("me");
     cfg.expressions = vec![
-        AvatarExpression { name: "calm".into(), path: "c.png".into(), description: String::new() },
-        AvatarExpression { name: "angry".into(), path: "a.png".into(), description: String::new() },
+        AvatarExpression { name: "calm".into(), path: "c.png".into() },
+        AvatarExpression { name: "angry".into(), path: "a.png".into() },
     ];
     let doc = TranscriptDoc {
         id: Id::new(),
@@ -1949,16 +1949,8 @@ fn avatar_video_generates_from_images_and_videos() {
     cfg.shake_factor = 0.0; // deterministic pixel positions
     cfg.scale = 0.5; // 200px avatar on a 400px canvas → corners transparent
     cfg.expressions = vec![
-        AvatarExpression {
-            name: "calm".into(),
-            path: calm.to_string_lossy().into_owned(),
-            description: "neutral".into(),
-        },
-        AvatarExpression {
-            name: "angry".into(),
-            path: angry.to_string_lossy().into_owned(),
-            description: "furious, upset".into(),
-        },
+        AvatarExpression { name: "calm".into(), path: calm.to_string_lossy().into_owned() },
+        AvatarExpression { name: "angry".into(), path: angry.to_string_lossy().into_owned() },
     ];
     let doc = TranscriptDoc {
         id: Id::new(),

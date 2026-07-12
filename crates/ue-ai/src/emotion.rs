@@ -46,33 +46,14 @@ pub fn measure_volumes(doc: &mut TranscriptDoc, wav: &WavMap) {
     };
 }
 
-/// The toolkit's prompt (build_emotion_system_prompt).
+/// The toolkit's prompt (build_emotion_system_prompt). The expression NAMES
+/// are the whole contract, exactly like the toolkit's `{ emotion: path }`.
 pub fn emotion_system_prompt(labels: &[String]) -> String {
-    let described: Vec<(String, String)> =
-        labels.iter().map(|l| (l.clone(), String::new())).collect();
-    emotion_system_prompt_described(&described)
-}
-
-/// Same prompt, enriched with each label's user-written description
-/// ("angry: furious, upset, complaining"), which greatly improves matching.
-pub fn emotion_system_prompt_described(labels: &[(String, String)]) -> String {
-    let list = labels
-        .iter()
-        .map(|(name, desc)| {
-            if desc.trim().is_empty() {
-                name.clone()
-            } else {
-                format!("{name} ({})", desc.trim())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let names =
-        labels.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
+    let names = labels.join(", ");
     format!(
         "You are an emotion classifier. Given a short phrase in any language, \
-         reply with exactly one of the following labels: {list}. \
-         Respond with just the label name (one of: {names}), no extra text. \
+         reply with exactly one of the following labels: {names}. \
+         Respond with just the label name, no extra text. \
          Try to be expressive."
     )
 }
@@ -118,24 +99,10 @@ pub fn classify_via_api(
     text: &str,
     available: &[String],
 ) -> Option<String> {
-    let described: Vec<(String, String)> =
-        available.iter().map(|l| (l.clone(), String::new())).collect();
-    classify_via_api_described(api_base, api_key, model, text, &described)
-}
-
-/// Classifier using per-label descriptions (avatar expressions).
-pub fn classify_via_api_described(
-    api_base: &str,
-    api_key: &str,
-    model: &str,
-    text: &str,
-    described: &[(String, String)],
-) -> Option<String> {
-    let available: Vec<String> = described.iter().map(|(n, _)| n.clone()).collect();
     let body = serde_json::json!({
         "model": model,
         "messages": [
-            { "role": "system", "content": emotion_system_prompt_described(described) },
+            { "role": "system", "content": emotion_system_prompt(available) },
             { "role": "user", "content": text },
         ],
     });
