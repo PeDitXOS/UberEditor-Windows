@@ -960,7 +960,7 @@ fn tool_count_matches_the_docs() {
     let state = AppState::new_default();
     let tools = rpc(&state, "tools/list", json!({}));
     let n = tools.pointer("/result/tools").unwrap().as_array().unwrap().len();
-    assert_eq!(n, 52, "README/docs/MCP.md advertise the tool count; update them");
+    assert_eq!(n, 53, "README/docs/MCP.md advertise the tool count; update them");
 }
 
 /// GOLDEN RULE: the paused preview must show subtitles, exactly like the
